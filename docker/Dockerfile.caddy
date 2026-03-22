@@ -1,0 +1,85 @@
+# Dockerfile.caddy — Caddy with Pidgin compression plugin (cgo + libpidgin).
+#
+# Build context must be the pidgin repo root (context: ..)
+
+# === Stage 1: Build libpidgin ===
+FROM alpine:3.20 AS libbuilder
+
+RUN apk add --no-cache gcc g++ musl-dev make brotli-dev
+
+COPY libpidgin/ /build/libpidgin/
+WORKDIR /build/libpidgin
+
+RUN gcc -O2 -fPIC -shared -o libpidgin.so -Iinclude src/pidgin.c \
+        -lbrotlienc -lbrotlidec -lpthread && \
+    cp libpidgin.so /usr/lib/ && \
+    cp include/pidgin.h /usr/include/ && \
+    ldconfig /usr/lib 2>/dev/null || true
+
+# Also build a static library for xcaddy linking
+RUN gcc -O2 -fPIC -c -Iinclude src/pidgin.c -o pidgin.o && \
+    ar rcs libpidgin.a pidgin.o && \
+    cp libpidgin.a /usr/lib/
+
+# === Stage 2: Build Caddy with pidgin plugin using xcaddy ===
+FROM golang:1.22-alpine AS builder
+
+RUN apk add --no-cache gcc g++ musl-dev brotli-dev git
+
+# Copy libpidgin shared + static libs and header
+COPY --from=libbuilder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=libbuilder /usr/lib/libpidgin.a /usr/lib/libpidgin.a
+COPY --from=libbuilder /usr/include/pidgin.h /usr/include/pidgin.h
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+# Install xcaddy
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+# Copy the pidgin caddy module source
+COPY modules/caddy/ /build/caddy-pidgin/
+
+# Copy pidgin.h into the module directory so cgo can find it
+RUN cp /usr/include/pidgin.h /build/caddy-pidgin/
+
+# Build Caddy with the pidgin plugin
+WORKDIR /build
+ENV CGO_ENABLED=1
+ENV CGO_CFLAGS="-I/usr/include"
+ENV CGO_LDFLAGS="-L/usr/lib -lpidgin -lbrotlienc -lbrotlidec"
+
+RUN xcaddy build \
+    --with github.com/pidgin-compress/caddy-pidgin=/build/caddy-pidgin \
+    --output /usr/bin/caddy
+
+# === Stage 3: Runtime ===
+FROM alpine:3.20
+
+RUN apk add --no-cache brotli-libs ca-certificates
+
+COPY --from=libbuilder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+# Write Caddyfile
+# The pidgin middleware intercepts /.well-known/pidgin/* internally,
+# observes JSON on /api/*, and compresses when Accept-Encoding: pidgin.
+RUN mkdir -p /etc/caddy && cat > /etc/caddy/Caddyfile <<'CADDYFILE'
+{
+    auto_https off
+    admin off
+    order pidgin before reverse_proxy
+}
+
+:8080 {
+    pidgin {
+        learn_samples   30
+        min_size        256
+        evolve_interval 500
+    }
+    reverse_proxy backend:8000
+}
+CADDYFILE
+
+EXPOSE 8080
+
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile"]

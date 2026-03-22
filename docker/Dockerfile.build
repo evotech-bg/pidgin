@@ -1,0 +1,122 @@
+# Dockerfile.build — Multi-stage builder for libpidgin + all server modules.
+#
+# Produces:
+#   /usr/lib/libpidgin.so           — shared library
+#   /usr/lib/nginx/modules/ngx_http_pidgin_module.so
+#   /usr/lib/apache2/mod_pidgin.so
+#
+# Usage:
+#   docker build -f Dockerfile.build -t pidgin-builder .
+
+FROM alpine:3.20 AS builder
+
+RUN apk add --no-cache \
+    gcc g++ musl-dev make cmake \
+    brotli-dev zlib-dev \
+    linux-headers \
+    # nginx build deps
+    pcre2-dev openssl-dev \
+    # apache build deps
+    apache2-dev apr-dev apr-util-dev \
+    # tools
+    curl tar patch
+
+# ------------------------------------------------------------------ #
+# Build libpidgin                                                     #
+# ------------------------------------------------------------------ #
+
+COPY libpidgin/ /build/libpidgin/
+
+WORKDIR /build/libpidgin
+
+RUN if [ -f Makefile ]; then \
+        make clean || true; \
+        make CFLAGS="-O2 -fPIC" && make install PREFIX=/usr; \
+    elif [ -f CMakeLists.txt ]; then \
+        mkdir -p build && cd build && \
+        cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release && \
+        make -j$(nproc) && make install; \
+    else \
+        echo "No build system found, compiling manually"; \
+        gcc -O2 -fPIC -shared -o libpidgin.so \
+            -I include \
+            src/*.c \
+            -lbrotlienc -lbrotlidec -lz && \
+        cp libpidgin.so /usr/lib/ && \
+        cp include/pidgin.h /usr/include/; \
+    fi
+
+RUN ldconfig /usr/lib 2>/dev/null || true
+RUN ls -la /usr/lib/libpidgin*
+
+# ------------------------------------------------------------------ #
+# Build nginx module                                                  #
+# ------------------------------------------------------------------ #
+
+ARG NGINX_VERSION=1.26.2
+
+RUN curl -fsSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
+    | tar xz -C /build/
+
+COPY modules/nginx/ /build/ngx_http_pidgin_module/
+
+# Copy pidgin.h into the module source directory so nginx can find it
+RUN cp /usr/include/pidgin.h /build/ngx_http_pidgin_module/
+
+WORKDIR /build/nginx-${NGINX_VERSION}
+
+RUN ./configure \
+        --prefix=/etc/nginx \
+        --sbin-path=/usr/sbin/nginx \
+        --modules-path=/usr/lib/nginx/modules \
+        --with-compat \
+        --add-dynamic-module=/build/ngx_http_pidgin_module \
+    && make modules -j$(nproc)
+
+RUN mkdir -p /usr/lib/nginx/modules && \
+    cp objs/ngx_http_pidgin_module.so /usr/lib/nginx/modules/
+
+# ------------------------------------------------------------------ #
+# Build Apache module                                                 #
+# ------------------------------------------------------------------ #
+
+COPY modules/apache/ /build/mod_pidgin/
+
+WORKDIR /build/mod_pidgin
+
+# apxs compiles and installs the module
+RUN cp /usr/include/pidgin.h . && \
+    apxs -i -a -c \
+        -I/usr/include \
+        -L/usr/lib -lpidgin \
+        mod_pidgin.c || \
+    ( \
+        gcc -shared -fPIC -o mod_pidgin.so \
+            -I/usr/include \
+            -I/usr/include/apache2 \
+            -I/usr/include/apr-1 \
+            $(apr-1-config --cflags --cppflags --includes 2>/dev/null) \
+            $(apu-1-config --includes 2>/dev/null) \
+            mod_pidgin.c \
+            -L/usr/lib -lpidgin && \
+        mkdir -p /usr/lib/apache2 && \
+        cp mod_pidgin.so /usr/lib/apache2/ \
+    )
+
+RUN ls -la /usr/lib/apache2/mod_pidgin.so 2>/dev/null || \
+    ls -la /usr/lib/apache2/modules/mod_pidgin.so 2>/dev/null || \
+    echo "mod_pidgin.so built successfully"
+
+# ------------------------------------------------------------------ #
+# Final layout                                                        #
+# ------------------------------------------------------------------ #
+
+FROM alpine:3.20 AS artifacts
+
+COPY --from=builder /usr/lib/libpidgin.so                      /artifacts/lib/
+COPY --from=builder /usr/include/pidgin.h                      /artifacts/include/
+COPY --from=builder /usr/lib/nginx/modules/ngx_http_pidgin_module.so \
+                                                                /artifacts/nginx/
+COPY --from=builder /usr/lib/apache2/mod_pidgin.so             /artifacts/apache/
+
+RUN ls -laR /artifacts/

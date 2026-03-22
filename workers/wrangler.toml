@@ -1,0 +1,13 @@
+name = "pidgin-compression"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# Route: deploy in front of your API
+# route = { pattern = "api.example.com/*", zone_name = "example.com" }
+
+[build]
+command = "bash build.sh"
+
+# Limits
+[limits]
+cpu_ms = 50

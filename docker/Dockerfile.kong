@@ -1,0 +1,46 @@
+# Dockerfile.kong — Kong Gateway with Pidgin plugin (Lua FFI to libpidgin).
+
+FROM ubuntu:22.04 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make libbrotli-dev && rm -rf /var/lib/apt/lists/*
+
+COPY libpidgin/ /build/libpidgin/
+WORKDIR /build/libpidgin
+RUN gcc -O2 -fPIC -shared -o libpidgin.so -Iinclude src/pidgin.c -lbrotlienc -lbrotlidec -lpthread
+
+FROM kong:3.7
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libbrotli1 && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/libpidgin/libpidgin.so /usr/lib/libpidgin.so
+RUN ldconfig
+
+# Install Lua plugin
+RUN mkdir -p /usr/local/share/lua/5.1/kong/plugins/pidgin
+COPY modules/kong/handler.lua /usr/local/share/lua/5.1/kong/plugins/pidgin/handler.lua
+COPY modules/kong/schema.lua /usr/local/share/lua/5.1/kong/plugins/pidgin/schema.lua
+
+# Kong declarative config
+RUN mkdir -p /etc/kong && cat > /etc/kong/kong.yml <<'KONG_CONF'
+_format_version: "3.0"
+
+services:
+  - name: backend
+    url: http://backend:8000
+    routes:
+      - name: api
+        paths:
+          - /api
+          - /health
+        strip_path: false
+    plugins:
+      - name: pidgin
+        config:
+          learn_samples: 30
+          min_size: 256
+KONG_CONF
+
+USER kong
+EXPOSE 8000 8001

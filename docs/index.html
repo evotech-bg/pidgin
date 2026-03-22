@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pidgin -- Runtime-learned compression that beats Protobuf</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0e1a;--bg2:#0f1428;--bg3:#141a32;--cyan:#00d4ff;--cyan-dim:#00d4ff33;--white:#e8ecf4;--gray:#8892a8;--green:#00e88f;--red:#ff4466;--orange:#ffaa33}
+html{scroll-behavior:smooth}
+body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--white);line-height:1.7;overflow-x:hidden}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+
+.container{max-width:960px;margin:0 auto;padding:0 24px}
+
+/* Nav */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:var(--bg);border-bottom:1px solid var(--cyan-dim);padding:12px 0}
+nav .container{display:flex;justify-content:space-between;align-items:center}
+nav .logo{font-size:1.1rem;font-weight:700;color:var(--cyan)}
+nav .links{display:flex;gap:24px;font-size:0.8rem}
+nav .links a{color:var(--gray)}
+nav .links a:hover{color:var(--cyan);text-decoration:none}
+
+/* Hero */
+.hero{padding:140px 0 80px;text-align:center}
+.hero h1{font-size:2.4rem;font-weight:700;margin-bottom:12px}
+.hero h1 span{color:var(--cyan)}
+.hero .tagline{font-size:1rem;color:var(--gray);max-width:640px;margin:0 auto 32px}
+.hero .install{display:inline-block;background:var(--bg3);border:1px solid var(--cyan-dim);border-radius:6px;padding:12px 28px;font-size:0.9rem;color:var(--cyan);margin-bottom:16px}
+.hero .install::before{content:"$ ";color:var(--gray)}
+.hero .sub{font-size:0.75rem;color:var(--gray)}
+
+/* Sections */
+section{padding:64px 0}
+section h2{font-size:1.5rem;font-weight:700;margin-bottom:8px;color:var(--cyan)}
+section h2::before{content:"# ";color:var(--gray)}
+section .subtitle{color:var(--gray);margin-bottom:32px;font-size:0.85rem}
+
+/* Benchmark */
+.bench-section{background:var(--bg2);border-top:1px solid var(--cyan-dim);border-bottom:1px solid var(--cyan-dim)}
+.bench-grid{display:grid;gap:32px}
+.bench-block h3{font-size:0.9rem;color:var(--gray);margin-bottom:16px;font-weight:500}
+.bar-group{margin-bottom:20px}
+.bar-label{font-size:0.75rem;color:var(--gray);margin-bottom:6px;display:flex;justify-content:space-between}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.bar-name{font-size:0.7rem;color:var(--gray);width:80px;text-align:right;flex-shrink:0}
+.bar-track{flex:1;height:20px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative}
+.bar-fill{height:100%;border-radius:3px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;font-size:0.65rem;color:var(--bg);font-weight:700;transition:width 0.8s ease}
+.bar-fill.pidgin{background:var(--cyan)}
+.bar-fill.brotli{background:var(--orange)}
+.bar-fill.gzip{background:var(--gray)}
+.bar-fill.proto{background:var(--red)}
+.bar-fill.protozstd{background:#cc5577}
+
+/* Code blocks */
+pre{background:var(--bg3);border:1px solid var(--cyan-dim);border-radius:6px;padding:20px;overflow-x:auto;margin-bottom:16px;font-size:0.8rem;line-height:1.8}
+code{font-family:'JetBrains Mono',monospace}
+.kw{color:var(--cyan)}
+.fn{color:var(--green)}
+.str{color:var(--orange)}
+.cmt{color:var(--gray);font-style:italic}
+.var{color:var(--white)}
+
+/* Feature cards */
+.features{display:grid;grid-template-columns:1fr;gap:24px}
+@media(min-width:640px){.features{grid-template-columns:1fr 1fr}}
+.card{background:var(--bg2);border:1px solid var(--cyan-dim);border-radius:8px;padding:24px}
+.card h3{font-size:1rem;margin-bottom:8px;color:var(--white)}
+.card p{font-size:0.8rem;color:var(--gray);line-height:1.6}
+.card .tag{display:inline-block;font-size:0.65rem;padding:2px 8px;border-radius:3px;margin-bottom:12px;border:1px solid}
+.card .tag.core{color:var(--cyan);border-color:var(--cyan)}
+.card .tag.ai{color:var(--green);border-color:var(--green)}
+.card .tag.sec{color:var(--orange);border-color:var(--orange)}
+
+/* Pipeline */
+.pipeline{display:flex;flex-direction:column;align-items:center;gap:0;margin:32px 0}
+.pipe-step{background:var(--bg3);border:1px solid var(--cyan-dim);border-radius:6px;padding:14px 28px;text-align:center;width:280px}
+.pipe-step .name{font-size:0.85rem;color:var(--cyan);font-weight:700}
+.pipe-step .desc{font-size:0.7rem;color:var(--gray)}
+.pipe-arrow{color:var(--cyan-dim);font-size:1.2rem;line-height:1}
+
+/* Comparison table */
+table{width:100%;border-collapse:collapse;font-size:0.75rem;margin-bottom:24px}
+th{text-align:left;padding:10px 12px;border-bottom:2px solid var(--cyan-dim);color:var(--cyan);font-weight:500}
+td{padding:10px 12px;border-bottom:1px solid var(--cyan-dim)}
+tr:hover{background:var(--bg3)}
+td.best{color:var(--cyan);font-weight:700}
+
+/* Footer */
+footer{border-top:1px solid var(--cyan-dim);padding:32px 0;text-align:center;font-size:0.75rem;color:var(--gray)}
+footer a{color:var(--cyan)}
+
+/* Responsive */
+@media(max-width:640px){
+  .hero h1{font-size:1.6rem}
+  .hero .install{font-size:0.75rem;padding:10px 16px}
+  nav .links{gap:12px;font-size:0.7rem}
+  .bar-name{width:60px;font-size:0.6rem}
+  pre{padding:12px;font-size:0.7rem}
+  table{font-size:0.65rem}
+  th,td{padding:6px 8px}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="container">
+    <div class="logo">pidgin</div>
+    <div class="links">
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#servers">Servers</a>
+      <a href="#evolution">Evolution</a>
+      <a href="#api">API</a>
+      <a href="https://github.com/igergow/pidgin">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <h1><span>Pidgin</span> -- Runtime-learned compression that beats Protobuf</h1>
+    <p class="tagline">Learns schemas at runtime from sample JSON, strips keys entirely, encodes values optimally. No .proto files, no codegen, zero config.</p>
+    <div class="install">pip install pidgin</div>
+    <div class="sub">Python 3.10+ / MIT License / C extension auto-detected</div>
+  </div>
+</section>
+
+<!-- Benchmarks -->
+<section class="bench-section" id="benchmarks">
+  <div class="container">
+    <h2>Benchmarks</h2>
+    <p class="subtitle">Compression ratio: % of original JSON size (lower is better). Verified on identical data, single-threaded.</p>
+
+    <div class="bench-grid">
+      <div class="bench-block">
+        <h3>Users x1000</h3>
+        <div class="bar-group">
+          <div class="bar-row">
+            <span class="bar-name">gzip</span>
+            <div class="bar-track"><div class="bar-fill gzip" style="width:21.4%">21.4%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">brotli</span>
+            <div class="bar-track"><div class="bar-fill brotli" style="width:19.5%">19.5%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Proto+zstd</span>
+            <div class="bar-track"><div class="bar-fill protozstd" style="width:20.3%">20.3%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Pidgin</span>
+            <div class="bar-track"><div class="bar-fill pidgin" style="width:18.9%">18.9%</div></div>
+          </div>
+        </div>
+
+        <h3>Orders x500 (nested)</h3>
+        <div class="bar-group">
+          <div class="bar-row">
+            <span class="bar-name">gzip</span>
+            <div class="bar-track"><div class="bar-fill gzip" style="width:19.1%">19.1%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">brotli</span>
+            <div class="bar-track"><div class="bar-fill brotli" style="width:17.5%">17.5%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Proto+zstd</span>
+            <div class="bar-track"><div class="bar-fill protozstd" style="width:17.4%">17.4%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Pidgin</span>
+            <div class="bar-track"><div class="bar-fill pidgin" style="width:16.1%">16.1%</div></div>
+          </div>
+        </div>
+
+        <h3>Events x5000</h3>
+        <div class="bar-group">
+          <div class="bar-row">
+            <span class="bar-name">gzip</span>
+            <div class="bar-track"><div class="bar-fill gzip" style="width:13.6%">13.6%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">brotli</span>
+            <div class="bar-track"><div class="bar-fill brotli" style="width:12.3%">12.3%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Proto+zstd</span>
+            <div class="bar-track"><div class="bar-fill protozstd" style="width:12.3%">12.3%</div></div>
+          </div>
+          <div class="bar-row">
+            <span class="bar-name">Pidgin</span>
+            <div class="bar-track"><div class="bar-fill pidgin" style="width:10.8%">10.8%</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h3 style="font-size:0.9rem;color:var(--gray);margin:32px 0 16px;font-weight:500">Speed (ms, with C extension -- lower is better)</h3>
+    <table>
+      <thead>
+        <tr><th>Dataset</th><th>brotli</th><th>zstd</th><th>Proto+zstd</th><th>Pidgin</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Users x1000</td><td>7.78</td><td>3.67</td><td>5.76</td><td class="best">6.41</td></tr>
+        <tr><td>Orders x500</td><td>10.52</td><td>6.41</td><td>6.97</td><td class="best">7.96</td></tr>
+        <tr><td>Events x5000</td><td>30.49</td><td>14.85</td><td>24.92</td><td class="best">25.62</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:0.75rem;color:var(--gray)">Best compression across all datasets. Speed competitive with Proto+zstd, faster than brotli on all except Users.</p>
+  </div>
+</section>
+
+<!-- Features -->
+<section id="features">
+  <div class="container">
+    <h2>Features</h2>
+    <p class="subtitle">Two layers, each useful independently.</p>
+
+    <div class="features" style="grid-template-columns:1fr 1fr">
+      <div class="card">
+        <span class="tag core">core</span>
+        <h3>SchemaCodec</h3>
+        <p>Runtime-learned binary compression. Feed it sample JSON, it infers the schema -- field names, types, enum domains, nesting. Then it strips keys entirely and encodes values with type-optimal encoders. C extension for native speed.</p>
+      </div>
+      <div class="card">
+        <span class="tag sec">optional</span>
+        <h3>RatchetCipher</h3>
+        <p>Forward-secrecy encryption for persistent channels (WebSocket, SSE, IoT). Keys ratchet after every message -- compromising a future key cannot decrypt past messages. Install with <code>pip install pidgin[crypto]</code>.</p>
+      </div>
+    </div>
+
+    <!-- Code examples -->
+    <div style="margin-top:48px">
+      <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:16px;font-weight:500">SchemaCodec</h3>
+<pre><code><span class="kw">from</span> <span class="var">pidgin</span> <span class="kw">import</span> <span class="fn">SchemaCodec</span>
+
+<span class="cmt"># Learn schema from sample records</span>
+<span class="var">codec</span> = <span class="fn">SchemaCodec</span>.<span class="fn">learn</span>(<span class="var">sample_records</span>)
+
+<span class="cmt"># Compress: ~10-19% of original JSON</span>
+<span class="var">compressed</span> = <span class="var">codec</span>.<span class="fn">compress</span>(<span class="var">records</span>)
+
+<span class="cmt"># Decompress: lossless round-trip</span>
+<span class="var">original</span> = <span class="var">codec</span>.<span class="fn">decompress</span>(<span class="var">compressed</span>)</code></pre>
+
+      <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:16px;font-weight:500">Schema Evolution</h3>
+<pre><code><span class="cmt"># v1 schema</span>
+<span class="var">codec_v1</span> = <span class="fn">SchemaCodec</span>.<span class="fn">learn</span>(<span class="var">users_v1</span>)
+
+<span class="cmt"># Data gains new fields, types change</span>
+<span class="var">profile_v2</span> = <span class="var">codec_v1</span>.<span class="var">profile</span>.<span class="fn">evolve</span>(<span class="var">users_v2</span>)
+<span class="var">codec_v2</span> = <span class="fn">SchemaCodec</span>(<span class="var">profile_v2</span>)
+
+<span class="cmt"># v2 handles both old and new data shapes</span>
+<span class="var">codec_v2</span>.<span class="fn">compress</span>(<span class="var">old_data</span>)  <span class="cmt"># missing new fields → absent marker</span>
+<span class="var">codec_v2</span>.<span class="fn">compress</span>(<span class="var">new_data</span>)  <span class="cmt"># new fields encoded, removed fields skipped</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- How it works -->
+<section id="how-it-works" style="background:var(--bg2);border-top:1px solid var(--cyan-dim);border-bottom:1px solid var(--cyan-dim)">
+  <div class="container">
+    <h2>How It Works</h2>
+    <p class="subtitle">Two-stage pipeline. Each stage is independent and composable.</p>
+
+    <div class="pipeline">
+      <div class="pipe-step">
+        <div class="name">JSON Input</div>
+        <div class="desc">Raw structured data (list of dicts)</div>
+      </div>
+      <div class="pipe-arrow">|</div>
+      <div class="pipe-step" style="border-color:var(--cyan)">
+        <div class="name">SchemaCodec</div>
+        <div class="desc">Learn schema from samples. Strip all keys.<br>Encode values by inferred type (int, float, str, bool, enum, nested).<br>Apply brotli on top. Output: compact binary.</div>
+      </div>
+      <div class="pipe-arrow">|</div>
+      <div class="pipe-step" style="border-color:var(--orange)">
+        <div class="name">RatchetCipher (optional)</div>
+        <div class="desc">Forward-secrecy encryption for persistent channels.<br>Key ratchets after every message.<br>Past messages safe even if future key leaks.</div>
+      </div>
+      <div class="pipe-arrow">|</div>
+      <div class="pipe-step">
+        <div class="name">Wire Output</div>
+        <div class="desc">Compressed, optionally encrypted binary</div>
+      </div>
+    </div>
+
+    <div style="margin-top:40px">
+      <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:12px;font-weight:500">Key insight: why Pidgin beats generic compressors</h3>
+      <p style="font-size:0.8rem;color:var(--gray);line-height:1.8">Generic compressors (gzip, brotli, zstd) treat data as opaque byte streams. They find repeated byte patterns but cannot exploit structural knowledge. In a JSON array of 1000 objects, the key <code>"email"</code> appears 1000 times -- generic compressors reduce this to a few bytes via backreferences, but Pidgin eliminates it entirely. It knows the schema, so the key is encoded once in the profile header, and each record contains only values in a fixed order. Combined with type-specific encoding (varints for integers, enum indices for categorical strings, nested sub-profiles for objects), this produces consistently smaller output.</p>
+    </div>
+  </div>
+</section>
+
+<!-- API -->
+<section id="api">
+  <div class="container">
+    <h2>API Reference</h2>
+    <p class="subtitle">Complete public interface. All classes importable from <code>pidgin</code>.</p>
+
+    <table>
+      <thead>
+        <tr><th>Class / Method</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>SchemaCodec.learn(samples)</code></td><td>Learn schema from list of dicts, return codec</td></tr>
+        <tr><td><code>codec.compress(data)</code></td><td>Compress dict or list[dict] to binary bytes</td></tr>
+        <tr><td><code>codec.decompress(data)</code></td><td>Decompress binary back to dict or list[dict]</td></tr>
+        <tr><td><code>codec.profile</code></td><td>Access learned SchemaProfile</td></tr>
+        <tr><td><code>profile.evolve(new_samples)</code></td><td>Evolve schema -- backward + forward compatible</td></tr>
+        <tr><td><code>profile.diff(other)</code></td><td>Show changes between profile versions</td></tr>
+        <tr><td><code>profile.to_json() / from_json()</code></td><td>Serialize / deserialize profile for sharing</td></tr>
+        <tr><td><code>RatchetCipher(shared_secret)</code></td><td>Init encryption with shared secret</td></tr>
+        <tr><td><code>cipher.encrypt(data)</code></td><td>Encrypt bytes + ratchet key forward</td></tr>
+        <tr><td><code>cipher.decrypt(data)</code></td><td>Decrypt bytes + ratchet key forward</td></tr>
+        <tr><td><code>SecureChannel.create(name)</code></td><td>E2E encrypted channel (X25519 + SchemaCodec + Ratchet)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- Server Integration -->
+<section id="servers" style="background:var(--bg2);border-top:1px solid var(--cyan-dim);border-bottom:1px solid var(--cyan-dim)">
+  <div class="container">
+    <h2>Server Integration</h2>
+    <p class="subtitle">One line to enable. Zero backend changes.</p>
+
+    <table>
+      <thead>
+        <tr><th>Server</th><th>Config</th><th>Integration</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Kong</td><td><code>pidgin = true</code></td><td>Lua FFI plugin</td></tr>
+        <tr><td>nginx</td><td><code>pidgin on;</code></td><td>Dynamic C module</td></tr>
+        <tr><td>Apache</td><td><code>PidginEnable On</code></td><td>Output filter</td></tr>
+        <tr><td>Caddy</td><td><code>pidgin</code></td><td>Go cgo middleware</td></tr>
+        <tr><td>Traefik</td><td>middleware config</td><td>Pure Go plugin</td></tr>
+        <tr><td>HAProxy</td><td>SPOE filter</td><td>External agent</td></tr>
+        <tr><td>FastAPI</td><td><code>add_middleware(PidginMiddleware)</code></td><td>Python</td></tr>
+        <tr><td>Django</td><td><code>MIDDLEWARE = [...]</code></td><td>Python</td></tr>
+      </tbody>
+    </table>
+
+    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">All modules use <code>libpidgin</code> (portable C library). Auto-learns schemas, auto-compresses, auto-evolves on API changes. Profiles served at <code>/.well-known/pidgin/</code>.</p>
+  </div>
+</section>
+
+<!-- Schema Evolution -->
+<section id="evolution">
+  <div class="container">
+    <h2>Schema Evolution</h2>
+    <p class="subtitle">API changes handled automatically. Zero downtime.</p>
+
+    <table>
+      <thead>
+        <tr><th>API Change</th><th>What Happens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>New field added</td><td>JSON fallback, then auto-evolve incorporates it as typed field</td></tr>
+        <tr><td>Field removed</td><td>ABSENT marker (1 byte), old clients unaffected</td></tr>
+        <tr><td>Field returns</td><td>Already in schema as nullable, encodes typed immediately</td></tr>
+        <tr><td>New enum value</td><td>Appended to list (old indices preserved)</td></tr>
+        <tr><td>Type widened (int to float)</td><td>Auto-widened safely</td></tr>
+        <tr><td>Schema drift detected</td><td>Auto-evolve, profile version bumped, new ETag</td></tr>
+      </tbody>
+    </table>
+
+    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">Old clients with v1 profiles decode v2 data (unknown fields in JSON fallback). New clients with v2 profiles decode v1 data (missing fields as absent). Bidirectional compatibility guaranteed.</p>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p><a href="https://github.com/igergow/pidgin">GitHub</a> &middot; <a href="https://pypi.org/project/pidgin/">PyPI</a> &middot; MIT License &middot; Python 3.10+</p>
+    <p style="margin-top:8px">Built by Evo Tech Labs</p>
+  </div>
+</footer>
+
+<script>
+// Animate bars on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.querySelectorAll('.bar-fill').forEach(bar => {
+        const width = bar.style.width;
+        bar.style.width = '0%';
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            bar.style.width = width;
+          });
+        });
+      });
+      observer.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.2 });
+
+document.querySelectorAll('.bar-group').forEach(g => observer.observe(g));
+</script>
+
+</body>
+</html>

@@ -1,0 +1,93 @@
+# Dockerfile.nginx — nginx with Pidgin compression module.
+#
+# Build context must be the pidgin repo root (context: ..)
+
+# === Stage 1: Build libpidgin + nginx module ===
+FROM alpine:3.20 AS builder
+
+RUN apk add --no-cache gcc g++ musl-dev make brotli-dev pcre2-dev openssl-dev zlib-dev curl linux-headers
+
+# Build libpidgin
+COPY libpidgin/ /build/libpidgin/
+WORKDIR /build/libpidgin
+RUN make clean 2>/dev/null; \
+    gcc -O2 -fPIC -shared -o libpidgin.so -Iinclude src/pidgin.c -lbrotlienc -lbrotlidec -lpthread && \
+    cp libpidgin.so /usr/lib/ && \
+    cp include/pidgin.h /usr/include/ && \
+    ldconfig /usr/lib 2>/dev/null || true
+
+# Build nginx module
+ARG NGINX_VERSION=1.26.3
+RUN curl -fsSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" | tar xz -C /build/
+COPY modules/nginx/ /build/ngx_http_pidgin_module/
+RUN cp /usr/include/pidgin.h /build/ngx_http_pidgin_module/
+WORKDIR /build/nginx-${NGINX_VERSION}
+RUN ./configure \
+        --prefix=/etc/nginx \
+        --sbin-path=/usr/sbin/nginx \
+        --modules-path=/usr/lib/nginx/modules \
+        --with-compat \
+        --with-cc-opt="-Wno-error" \
+        --add-dynamic-module=/build/ngx_http_pidgin_module \
+    && make modules -j$(nproc) \
+    && mkdir -p /usr/lib/nginx/modules \
+    && cp objs/ngx_http_pidgin_module.so /usr/lib/nginx/modules/
+
+# === Stage 2: Runtime ===
+FROM nginx:1.26.3-alpine
+
+RUN apk add --no-cache brotli-libs
+
+COPY --from=builder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=builder /usr/lib/nginx/modules/ngx_http_pidgin_module.so /etc/nginx/modules/ngx_http_pidgin_module.so
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+RUN cat > /etc/nginx/nginx.conf <<'NGINX_CONF'
+load_module modules/ngx_http_pidgin_module.so;
+
+worker_processes auto;
+error_log /var/log/nginx/error.log info;
+pid       /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    sendfile   on;
+    keepalive_timeout 65;
+
+    upstream backend {
+        server backend:8000;
+    }
+
+    server {
+        listen 80;
+
+        location /api/ {
+            pidgin on;
+            pidgin_learn_samples 30;
+            pidgin_min_size 256;
+            proxy_pass http://backend;
+            proxy_set_header Host $host;
+            proxy_buffering on;
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+        }
+
+        location /health {
+            return 200 '{"status":"ok","server":"nginx"}';
+            default_type application/json;
+        }
+
+        location / {
+            proxy_pass http://backend;
+        }
+    }
+}
+NGINX_CONF
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

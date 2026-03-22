@@ -1,0 +1,64 @@
+# Dockerfile.apache — Apache with mod_pidgin.
+
+FROM alpine:3.20 AS builder
+
+RUN apk add --no-cache gcc g++ musl-dev make brotli-dev apache2-dev apr-dev apr-util-dev linux-headers
+
+COPY libpidgin/ /build/libpidgin/
+WORKDIR /build/libpidgin
+RUN gcc -O2 -fPIC -shared -o libpidgin.so -Iinclude src/pidgin.c -lbrotlienc -lbrotlidec -lpthread && \
+    cp libpidgin.so /usr/lib/ && cp include/pidgin.h /usr/include/ && \
+    ldconfig /usr/lib 2>/dev/null || true
+
+COPY modules/apache/ /build/mod_pidgin/
+WORKDIR /build/mod_pidgin
+RUN cp /usr/include/pidgin.h . && \
+    gcc -shared -fPIC -o mod_pidgin.so \
+        -I/usr/include -I/usr/include/apache2 -I/usr/include/apr-1 \
+        $(apr-1-config --cflags --cppflags --includes 2>/dev/null || true) \
+        mod_pidgin.c -L/usr/lib -lpidgin && \
+    mkdir -p /usr/lib/apache2 && cp mod_pidgin.so /usr/lib/apache2/
+
+FROM httpd:2.4-alpine
+RUN apk add --no-cache brotli-libs
+COPY --from=builder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=builder /usr/lib/apache2/mod_pidgin.so /usr/local/apache2/modules/mod_pidgin.so
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+RUN cat > /usr/local/apache2/conf/httpd.conf <<'CONF'
+ServerRoot "/usr/local/apache2"
+Listen 80
+LoadModule mpm_event_module modules/mod_mpm_event.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule unixd_module modules/mod_unixd.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule pidgin_module modules/mod_pidgin.so
+
+User daemon
+Group daemon
+ErrorLog /dev/stderr
+LogLevel info
+CustomLog /dev/stdout common
+
+<VirtualHost *:80>
+    ProxyPreserveHost On
+    <Location /api/>
+        PidginEnable On
+        PidginLearnSamples 30
+        PidginMinSize 256
+        ProxyPass http://backend:8000/api/
+        ProxyPassReverse http://backend:8000/api/
+    </Location>
+    <Location /health>
+        SetHandler default-handler
+        Header set Content-Type "application/json"
+    </Location>
+    ProxyPass / http://backend:8000/
+    ProxyPassReverse / http://backend:8000/
+</VirtualHost>
+CONF
+
+EXPOSE 80

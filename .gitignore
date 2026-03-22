@@ -1,0 +1,50 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# C build artifacts
+*.so
+*.dylib
+*.a
+*.o
+
+# Internal (not for public repo)
+.claude/
+lib/
+stages/
+results/
+TODO.md
+test_data.json
+unseen_test_data.json
+
+# Old Protocol module (moved to ~/Projects/terse/)
+src/pidgin/_codec.py
+src/pidgin/_prompts.py
+src/pidgin/_protocol.py
+src/pidgin/_types.py
+tests/test_protocol.py
+
+# JS build artifacts
+clients/js/node_modules/
+clients/js/dist/
+
+# C library build artifacts
+libpidgin/libpidgin.*
+libpidgin/test_pidgin
+libpidgin/*.o
+
+# WASM build artifacts
+workers/pidgin.wasm
+workers/pidgin.js
+workers/pidgin_debug.*
+
+# Paper (published separately on arXiv)
+paper/
+
+# OS
+.DS_Store

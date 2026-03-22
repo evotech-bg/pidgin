@@ -1,0 +1,66 @@
+# Dockerfile.haproxy — HAProxy with Pidgin SPOE compression agent.
+#
+# Architecture:
+#   This builds two containers via docker-compose:
+#   1. haproxy — HAProxy with SPOE filter configured
+#   2. pidgin-spoe — Go SPOE agent with libpidgin (cgo)
+#
+# This Dockerfile builds the pidgin-spoe agent binary.
+# A separate haproxy service uses the official image with config mounted.
+#
+# Build context must be the pidgin repo root (context: ..)
+
+# === Stage 1: Build libpidgin ===
+FROM alpine:3.20 AS libbuilder
+
+RUN apk add --no-cache gcc g++ musl-dev make brotli-dev
+
+COPY libpidgin/ /build/libpidgin/
+WORKDIR /build/libpidgin
+
+RUN gcc -O2 -fPIC -shared -o libpidgin.so -Iinclude src/pidgin.c \
+        -lbrotlienc -lbrotlidec -lpthread && \
+    cp libpidgin.so /usr/lib/ && \
+    cp include/pidgin.h /usr/include/ && \
+    ldconfig /usr/lib 2>/dev/null || true
+
+# Static library for static linking
+RUN gcc -O2 -fPIC -c -Iinclude src/pidgin.c -o pidgin.o && \
+    ar rcs libpidgin.a pidgin.o && \
+    cp libpidgin.a /usr/lib/
+
+# === Stage 2: Build pidgin-spoe Go binary ===
+FROM golang:1.22-alpine AS builder
+
+RUN apk add --no-cache gcc g++ musl-dev brotli-dev brotli-static
+
+COPY --from=libbuilder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=libbuilder /usr/lib/libpidgin.a /usr/lib/libpidgin.a
+COPY --from=libbuilder /usr/include/pidgin.h /usr/include/pidgin.h
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+COPY modules/haproxy/ /build/pidgin-spoe/
+
+# Copy pidgin.h into the build directory for cgo
+RUN cp /usr/include/pidgin.h /build/pidgin-spoe/
+
+WORKDIR /build/pidgin-spoe
+
+ENV CGO_ENABLED=1
+ENV CGO_CFLAGS="-I/usr/include"
+ENV CGO_LDFLAGS="-L/usr/lib -lpidgin -lbrotlienc -lbrotlidec"
+
+RUN go build -o /usr/bin/pidgin-spoe pidgin-spoe.go
+
+# === Stage 3: Runtime for SPOE agent ===
+FROM alpine:3.20
+
+RUN apk add --no-cache brotli-libs
+
+COPY --from=libbuilder /usr/lib/libpidgin.so /usr/lib/libpidgin.so
+COPY --from=builder /usr/bin/pidgin-spoe /usr/bin/pidgin-spoe
+RUN ldconfig /usr/lib 2>/dev/null || true
+
+EXPOSE 12345 8880
+
+CMD ["pidgin-spoe", "-tcp", ":12345", "-http", ":8880", "-learn", "30", "-evolve", "500", "-min-size", "256"]

@@ -1,0 +1,91 @@
+# Dockerfile.traefik — Traefik with Pidgin compression plugin (pure Go).
+#
+# Traefik plugins are loaded via Yaegi (Go interpreter), so no cgo needed.
+# Dependencies are vendored in a Go build stage and the result is copied
+# into the Traefik plugin directory.
+#
+# Build context must be the pidgin repo root (context: ..)
+
+# === Stage 1: Vendor Go dependencies ===
+FROM golang:1.22-alpine AS vendor
+
+RUN apk add --no-cache git
+
+WORKDIR /plugin
+
+COPY modules/traefik/plugin.go .
+COPY modules/traefik/go.mod .
+COPY modules/traefik/.traefik.yml .
+
+# Download and vendor dependencies (brotli)
+RUN go mod tidy && go mod vendor
+
+# === Stage 2: Traefik runtime ===
+FROM traefik:v3.1
+
+# Traefik local plugins directory structure:
+#   /plugins-local/src/<module-path>/
+RUN mkdir -p /plugins-local/src/github.com/pidgin-compress/traefik-pidgin
+
+# Copy plugin source + vendored dependencies
+COPY --from=vendor /plugin/plugin.go \
+     /plugins-local/src/github.com/pidgin-compress/traefik-pidgin/
+COPY --from=vendor /plugin/go.mod \
+     /plugins-local/src/github.com/pidgin-compress/traefik-pidgin/
+COPY --from=vendor /plugin/go.sum \
+     /plugins-local/src/github.com/pidgin-compress/traefik-pidgin/
+COPY --from=vendor /plugin/.traefik.yml \
+     /plugins-local/src/github.com/pidgin-compress/traefik-pidgin/
+COPY --from=vendor /plugin/vendor/ \
+     /plugins-local/src/github.com/pidgin-compress/traefik-pidgin/vendor/
+
+# Write Traefik static configuration
+RUN mkdir -p /etc/traefik && cat > /etc/traefik/traefik.yml <<'TRAEFIK_CONF'
+api:
+  dashboard: false
+  insecure: false
+
+entryPoints:
+  web:
+    address: ":8080"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+
+experimental:
+  localPlugins:
+    pidgin:
+      moduleName: github.com/pidgin-compress/traefik-pidgin
+TRAEFIK_CONF
+
+# Write Traefik dynamic configuration
+RUN cat > /etc/traefik/dynamic.yml <<'DYNAMIC_CONF'
+http:
+  routers:
+    api-router:
+      rule: "PathPrefix(`/api`) || PathPrefix(`/.well-known/pidgin`) || Path(`/health`)"
+      service: backend
+      entryPoints:
+        - web
+      middlewares:
+        - pidgin-compress
+
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: "http://backend:8000"
+
+  middlewares:
+    pidgin-compress:
+      plugin:
+        pidgin:
+          learn_samples: 30
+          min_size: 256
+          evolve_interval: 500
+DYNAMIC_CONF
+
+EXPOSE 8080
+
+CMD ["traefik", "--configFile=/etc/traefik/traefik.yml"]

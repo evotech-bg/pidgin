@@ -1,0 +1,9 @@
+displayName: Pidgin JSON Compression
+type: middleware
+import: github.com/pidgin-compress/traefik-pidgin
+summary: "Runtime-learned JSON compression for Traefik"
+
+testData:
+  learn_samples: 30
+  min_size: 256
+  evolve_interval: 500

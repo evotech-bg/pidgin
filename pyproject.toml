@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pidgin-codec"
+version = "0.1.0"
+description = "Runtime-learned compression that beats Protobuf — no .proto files, no codegen, zero config"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+authors = [
+    {name = "Ivo Gergov"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+keywords = ["compression", "json", "api", "protobuf", "binary", "schema", "codec"]
+dependencies = [
+    "brotli>=1.1.0",
+]
+
+[project.optional-dependencies]
+crypto = ["cryptography>=42.0"]
+benchmark = [
+    "zstandard>=0.23.0",
+    "msgpack>=1.0",
+    "orjson>=3.9",
+    "protobuf>=5.0",
+    "grpcio-tools>=1.60",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

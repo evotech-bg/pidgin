@@ -1,0 +1,104 @@
+# Pidgin compression test stack.
+#
+# Usage:
+#   cd docker && docker compose build && docker compose up -d && ./test.sh
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "9400:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.nginx
+    ports:
+      - "9401:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  apache:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.apache
+    ports:
+      - "9402:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  kong:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.kong
+    ports:
+      - "9403:8000"
+      - "9404:8001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_PLUGINS: "bundled,pidgin"
+
+  caddy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.caddy
+    ports:
+      - "9405:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  traefik:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.traefik
+    ports:
+      - "9406:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  pidgin-spoe:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.haproxy
+    expose:
+      - "12345"
+      - "8880"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8880/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    ports:
+      - "9407:8080"
+    volumes:
+      - ../modules/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ../modules/haproxy/spoe-pidgin.conf:/etc/haproxy/spoe-pidgin.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      pidgin-spoe:
+        condition: service_healthy
