@@ -16,6 +16,7 @@ Both sides know the schema, so keys are never transmitted.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import struct
 from collections import Counter
@@ -35,6 +36,18 @@ try:
 except ImportError:
     _c_encode_records = None
     _c_decode_records = None
+
+
+# === Exceptions ===
+
+class PidginDecodeError(ValueError):
+    """Raised when a Pidgin-encoded payload cannot be decoded.
+
+    Wraps the underlying cause (truncation, malformed length prefix, brotli
+    error, JSON parse error in fallback section, etc.) so callers can handle
+    all decode failures with a single except clause without leaking
+    implementation-specific exception types.
+    """
 
 
 # === Schema Types ===
@@ -101,6 +114,87 @@ class SchemaProfile:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), separators=(",", ":"))
+
+    def to_canonical_json(self) -> bytes:
+        """Sorted-keys JSON serialization (legacy, retained for compatibility)."""
+        return json.dumps(self.to_dict(), separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    def to_canonical_bytes(self) -> bytes:
+        """Pidgin Fingerprint Format v1 — must match libpidgin's encoding.
+
+        Format (all integers little-endian, all strings length-prefixed UTF-8):
+          profile := [version:u32][field_count:u32][field*]
+          field   := [name_len:u16][name][dtype:u8][nullable:u8]
+                     [enum_count:u16][enum*]
+                     [has_nested:u8] [field_count:u32 if has_nested][field* if has_nested]
+                     [has_items:u8]  [field_count:u32 if has_items] [field* if has_items]
+          enum    := [val_len:u16][val]
+
+        dtype encoding: 0=bool 1=int 2=float 3=str 4=enum 5=timestamp 6=object 7=array 8=null
+        """
+        DTYPE = {"bool": 0, "int": 1, "float": 2, "str": 3, "enum": 4,
+                 "timestamp": 5, "object": 6, "array": 7, "null": 8}
+
+        def emit_str(out: bytearray, s: str) -> None:
+            b = s.encode("utf-8")
+            if len(b) > 0xFFFF:
+                raise ValueError("string too long for canonical encoding")
+            out += struct.pack("<H", len(b))
+            out += b
+
+        def emit_field(out: bytearray, f: "FieldSchema") -> None:
+            emit_str(out, f.name)
+            out += bytes([DTYPE.get(f.dtype, 3)])
+            out += bytes([1 if f.nullable else 0])
+
+            evals = f.enum_values or []
+            if len(evals) > 0xFFFF:
+                raise ValueError("too many enum values")
+            out += struct.pack("<H", len(evals))
+            for v in evals:
+                emit_str(out, v)
+
+            has_nested = bool(f.nested)
+            out += bytes([1 if has_nested else 0])
+            if has_nested:
+                emit_fields(out, f.nested)
+
+            has_items = bool(f.items_schema)
+            out += bytes([1 if has_items else 0])
+            if has_items:
+                emit_fields(out, f.items_schema)
+
+        def emit_fields(out: bytearray, fields: dict) -> None:
+            order = list(fields.keys())  # nested fields preserve insertion order
+            out += struct.pack("<I", len(order))
+            for name in order:
+                emit_field(out, fields[name])
+
+        out = bytearray()
+        out += struct.pack("<I", self.version)
+        out += struct.pack("<I", len(self.field_order))
+        for name in self.field_order:
+            emit_field(out, self.fields[name])
+        return bytes(out)
+
+    @property
+    def fingerprint(self) -> str:
+        """16-hex-digit (64-bit FNV-1a) deterministic fingerprint of this profile.
+
+        Used for client-server profile-version negotiation. The hash function
+        and canonical-bytes encoding match libpidgin's compute_etag, so a
+        Python codec and a libpidgin-backed server (e.g., Kong via FFI)
+        produce identical fingerprints for the same logical profile.
+
+        FNV-1a is non-cryptographic; the fingerprint is for cache validation,
+        not a security boundary (see Security Considerations).
+        """
+        h = 0xcbf29ce484222325
+        mask = (1 << 64) - 1
+        for byte in self.to_canonical_bytes():
+            h ^= byte
+            h = (h * 0x100000001b3) & mask
+        return f"{h:016x}"
 
     @classmethod
     def from_json(cls, s: str) -> "SchemaProfile":
@@ -453,6 +547,30 @@ class SchemaCodec:
         profile = learn_schema(samples)
         return cls(profile, use_brotli)
 
+    @property
+    def fingerprint(self) -> str:
+        """Profile fingerprint — see SchemaProfile.fingerprint."""
+        return self.profile.fingerprint
+
+    def matches_fingerprint(self, client_fingerprint: str) -> bool:
+        """Check if a client's advertised profile fingerprint matches the active profile.
+
+        Used for HTTP content negotiation. The standard flow is:
+          1. Client requests with `Accept-Encoding: pidgin; profile=<hex>`
+          2. Server calls codec.matches_fingerprint(<hex>)
+          3. If True: encode with Pidgin
+             If False: fall back to brotli/gzip and let the client re-fetch the profile
+
+        The comparison is case-insensitive and tolerates a trailing length mismatch
+        (clients may truncate further than the server's 16 hex chars).
+        """
+        if not client_fingerprint:
+            return False
+        active = self.fingerprint.lower()
+        candidate = client_fingerprint.strip().lower()
+        # Allow client to send a prefix (we use 16; client may send 8 for shorter cache keys)
+        return active.startswith(candidate) or candidate.startswith(active)
+
     def _compile_c_schema(self) -> tuple | None:
         """Compile schema into a flat tuple structure for the C extension.
 
@@ -564,31 +682,60 @@ class SchemaCodec:
         return b"\x00" + raw
 
     def decompress(self, data: bytes) -> dict | list[dict]:
-        """Decompress back to original JSON structure."""
-        brotli_flag = data[0]
-        payload = data[1:]
+        """Decompress back to original JSON structure.
 
-        if brotli_flag == 0x01:
-            payload = brotli.decompress(payload)
+        Raises:
+            PidginDecodeError: if the payload is truncated, has an invalid
+                header, fails brotli decompression, contains a malformed
+                length prefix that would read past the buffer end, or has a
+                corrupt JSON fallback section. The exception preserves the
+                original cause via __cause__.
+        """
+        if not isinstance(data, (bytes, bytearray)):
+            raise PidginDecodeError(f"input must be bytes, got {type(data).__name__}")
+        if len(data) < 2:
+            raise PidginDecodeError(f"payload too short: {len(data)} bytes (minimum 2)")
 
-        # C fast path for array records
-        if self._c_schema is not None and len(payload) > 0 and payload[0] == 0x02:
-            try:
-                return _c_decode_records(payload, self._c_schema)
-            except Exception:
-                pass  # Fall through to Python path
+        try:
+            brotli_flag = data[0]
+            payload = data[1:]
 
-        pos = [0]  # mutable position tracker
+            if brotli_flag == 0x01:
+                try:
+                    payload = brotli.decompress(payload)
+                except Exception as e:
+                    raise PidginDecodeError("brotli decompression failed") from e
+            elif brotli_flag != 0x00:
+                raise PidginDecodeError(f"invalid brotli flag byte: 0x{brotli_flag:02x}")
 
-        marker = payload[pos[0]]
-        pos[0] += 1
+            if len(payload) == 0:
+                raise PidginDecodeError("payload is empty after header")
 
-        if marker == 0x02:
-            count = struct.unpack(">H", payload[pos[0]:pos[0]+2])[0]
-            pos[0] += 2
-            return [self._decode_object(payload, pos, self.profile.fields, self.profile.field_order) for _ in range(count)]
-        else:
-            return self._decode_object(payload, pos, self.profile.fields, self.profile.field_order)
+            # C fast path for array records
+            if self._c_schema is not None and payload[0] == 0x02:
+                try:
+                    return _c_decode_records(payload, self._c_schema)
+                except Exception:
+                    pass  # Fall through to Python path
+
+            pos = [0]
+            marker = payload[pos[0]]
+            pos[0] += 1
+
+            if marker == 0x02:
+                if pos[0] + 2 > len(payload):
+                    raise PidginDecodeError("array count truncated")
+                count = struct.unpack(">H", payload[pos[0]:pos[0]+2])[0]
+                pos[0] += 2
+                return [self._decode_object(payload, pos, self.profile.fields, self.profile.field_order) for _ in range(count)]
+            elif marker == 0x01:
+                return self._decode_object(payload, pos, self.profile.fields, self.profile.field_order)
+            else:
+                raise PidginDecodeError(f"invalid record marker byte: 0x{marker:02x}")
+        except PidginDecodeError:
+            raise
+        except (IndexError, struct.error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise PidginDecodeError("payload truncated or malformed") from e
 
     def _encode_object(self, obj: dict, fields: dict[str, FieldSchema], order: list[str], buf: bytearray):
         """Encode a single object according to schema — NO keys transmitted."""
