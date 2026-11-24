@@ -70,6 +70,35 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json);
 char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t len);
 
 /*
+ * Limits for decoding payloads from an untrusted source.
+ * max_output: largest payload after brotli, in bytes.
+ * max_items:  largest number of decoded items: every object counts one and
+ *             so does each field value in it, values inside the JSON
+ *             section for unknown fields included.
+ * A payload above either limit is refused (NULL), never truncated.
+ * pidgin_decompress() and pidgin_engine_decompress() use the defaults,
+ * which can be changed at build time with -DPIDGIN_MAX_OUTPUT=... and
+ * -DPIDGIN_MAX_ITEMS=...
+ */
+#ifndef PIDGIN_MAX_OUTPUT
+#define PIDGIN_MAX_OUTPUT (32u * 1024u * 1024u)
+#endif
+#ifndef PIDGIN_MAX_ITEMS
+#define PIDGIN_MAX_ITEMS 1000000u
+#endif
+#define PIDGIN_DEFAULT_MAX_OUTPUT PIDGIN_MAX_OUTPUT
+#define PIDGIN_DEFAULT_MAX_ITEMS  PIDGIN_MAX_ITEMS
+
+typedef struct {
+    size_t max_output;
+    size_t max_items;
+} pidgin_limits_t;
+
+/* As pidgin_decompress(), with explicit limits (NULL means the defaults). */
+char *pidgin_decompress_limits(pidgin_profile_t *profile, const uint8_t *data, size_t len,
+                               const pidgin_limits_t *limits);
+
+/*
  * Evolve a profile with new samples (backward + forward compatible).
  * Returns: new profile with bumped version. Caller must pidgin_profile_free().
  */

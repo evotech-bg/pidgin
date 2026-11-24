@@ -14,6 +14,9 @@
  *  10. Unknown field fallback
  */
 
+#include <sys/resource.h>
+#include <pthread.h>
+#include "limit_data.h"
 #include "../include/pidgin.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -759,6 +762,101 @@ static void test_refuse_inexact_integer(void) {
     printf("  -> done\n\n");
 }
 
+
+/* ================================================================
+ * Decoding untrusted payloads: limits
+ * ================================================================ */
+
+static long max_rss_mib(void) {
+    struct rusage u;
+    getrusage(RUSAGE_SELF, &u);
+#ifdef __APPLE__
+    return (long)(u.ru_maxrss >> 20);          /* bytes on macOS */
+#else
+    return (long)(u.ru_maxrss >> 10);          /* KiB on Linux */
+#endif
+}
+
+static void test_limit_brotli_bomb(void) {
+    printf("[test_limit_brotli_bomb]\n");
+    pidgin_profile_t *p = pidgin_learn("[{\"id\":1,\"n\":\"a\"},{\"id\":2,\"n\":\"b\"}]");
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, bomb_brotli, sizeof bomb_brotli);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B, process grew %ld MiB\n", sizeof bomb_brotli, grew);
+    ASSERT(out == NULL, "a payload expanding past the output limit is refused");
+    ASSERT(grew < 48, "the process does not grow past the limit");
+    if (out) pidgin_free(out);
+    pidgin_profile_free(p);
+    printf("  -> done\n\n");
+}
+
+static void test_limit_records_bomb(void) {
+    printf("[test_limit_records_bomb]\n");
+    pidgin_profile_t *p = pidgin_learn("[{\"a\":[{\"k\":\"x\"}]},{\"a\":[{\"k\":\"x\"}]}]");
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    char *small = pidgin_decompress(p, small_records, sizeof small_records);
+    ASSERT(small && strcmp(small, "[{\"a\":[{\"k\":\"x\"},{\"k\":\"x\"}]},{\"a\":[{\"k\":\"x\"},{\"k\":\"x\"}]}]") == 0,
+           "the test layout decodes (2 x 2)");
+    if (small) pidgin_free(small);
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, bomb_records, sizeof bomb_records);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B, process grew %ld MiB\n", sizeof bomb_records, grew);
+    ASSERT(out == NULL, "a payload with more items than the limit is refused");
+    ASSERT(grew < 160, "the process does not grow without bound");
+    if (out) pidgin_free(out);
+#ifdef PIDGIN_DEFAULT_MAX_OUTPUT
+    pidgin_limits_t lim = { 1024 * 1024, 10 };
+    char *few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few == NULL, "a lower item limit is honoured");
+    lim.max_items = 100;
+    few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few != NULL, "within the limit decodes");
+    if (few) pidgin_free(few);
+#endif
+    pidgin_profile_free(p);
+    printf("  -> done\n\n");
+}
+
+#define DEEP 29000
+#define DEEP_JSON_LEN (5 + 2 * DEEP + 1)
+#define DEEP_LEN (1 + 1 + 1 + 2 + DEEP_JSON_LEN)
+static pidgin_profile_t *deep_profile;
+static void *deep_worker(void *arg) {
+    return pidgin_decompress(deep_profile, (const uint8_t *)arg, DEEP_LEN);
+}
+
+static void test_limit_deep_json(void) {
+    printf("[test_limit_deep_json]\n");
+    deep_profile = pidgin_learn("[{\"id\":1},{\"id\":2}]");
+    ASSERT(deep_profile != NULL, "learn");
+    if (!deep_profile) return;
+    /* raw single record: id = 0, then the fallback {"a":[[[...]]]} */
+    uint8_t *buf = (uint8_t *)malloc(DEEP_LEN);
+    size_t o = 0;
+    buf[o++] = 0x00; buf[o++] = 0x01; buf[o++] = 0x00;
+    buf[o++] = (uint8_t)(DEEP_JSON_LEN >> 8); buf[o++] = (uint8_t)(DEEP_JSON_LEN & 0xFF);
+    memcpy(buf + o, "{\"a\":", 5); o += 5;
+    memset(buf + o, '[', DEEP); o += DEEP;
+    memset(buf + o, ']', DEEP); o += DEEP;
+    buf[o++] = '}';
+    ASSERT(o == DEEP_LEN, "layout");
+    /* a worker thread with a small stack, like a server worker */
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 256 * 1024);
+    pthread_t th; void *res = (void *)1;
+    pthread_create(&th, &at, deep_worker, buf);
+    pthread_join(th, &res);
+    ASSERT(res == NULL, "deeply nested JSON in the fallback is refused, not a crash");
+    if (res) pidgin_free(res);
+    free(buf);
+    pidgin_profile_free(deep_profile);
+    printf("  -> done\n\n");
+}
+
 /* ================================================================
  * Main
  * ================================================================ */
@@ -781,6 +879,9 @@ int main(void) {
     test_float_precision();
     test_number_text_precision();
     test_refuse_inexact_integer();
+    test_limit_brotli_bomb();
+    test_limit_records_bomb();
+    test_limit_deep_json();
 
     printf("=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

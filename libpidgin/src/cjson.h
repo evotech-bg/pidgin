@@ -215,7 +215,12 @@ int cJSON_IsObject(const cJSON *item) { return item && item->type == CJSON_OBJEC
  * Parser — recursive descent
  * ================================================================ */
 
-typedef struct { const char *content; size_t offset; size_t length; } parse_buffer;
+typedef struct { const char *content; size_t offset; size_t length; int depth; } parse_buffer;
+
+/* Nesting deeper than this is refused (recursion would exhaust the stack). */
+#ifndef CJSON_NESTING_LIMIT
+#define CJSON_NESTING_LIMIT 256
+#endif
 
 static int can_read(const parse_buffer *b, size_t n) {
     return b && (b->offset + n <= b->length);
@@ -500,8 +505,13 @@ static cJSON *parse_value(parse_buffer *b) {
     }
     if (c == '"') return parse_string(b);
     if (c == '-' || (c >= '0' && c <= '9')) return parse_number(b);
-    if (c == '[') return parse_array(b);
-    if (c == '{') return parse_object(b);
+    if (c == '[' || c == '{') {
+        if (b->depth >= CJSON_NESTING_LIMIT) return NULL;
+        b->depth++;
+        cJSON *item = (c == '[') ? parse_array(b) : parse_object(b);
+        b->depth--;
+        return item;
+    }
 
     return NULL;
 }
@@ -512,6 +522,7 @@ cJSON *cJSON_Parse(const char *value) {
     b.content = value;
     b.offset = 0;
     b.length = strlen(value);
+    b.depth = 0;
     return parse_value(&b);
 }
 

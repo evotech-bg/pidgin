@@ -140,7 +140,23 @@ typedef struct {
     const uint8_t *data;
     size_t         len;
     size_t         pos;
+    size_t         budget;   /* items that may still be decoded */
 } rdbuf_t;
+
+/* Take n items from the budget; -1 when the payload asks for more. */
+static int rd_charge(rdbuf_t *r, size_t n) {
+    if (n > r->budget) { r->budget = 0; return -1; }
+    r->budget -= n;
+    return 0;
+}
+
+/* A JSON blob can make at most one value per '[', '{', ',' or ':', plus one. */
+static int rd_charge_json(rdbuf_t *r, const uint8_t *s, size_t n) {
+    size_t items = 1;
+    for (size_t i = 0; i < n; i++)
+        if (s[i] == '[' || s[i] == '{' || s[i] == ',' || s[i] == ':') items++;
+    return rd_charge(r, items);
+}
 
 static int rd_u8(rdbuf_t *r, uint8_t *out) {
     if (r->pos >= r->len) return -1;
@@ -165,11 +181,13 @@ static int rd_bytes(rdbuf_t *r, const uint8_t **out, size_t n) {
 static int rd_varint(rdbuf_t *r, int64_t *out) {
     uint64_t result = 0;
     int shift = 0;
-    while (r->pos < r->len) {
+    for (;;) {
+        if (r->pos >= r->len) return -1;          /* truncated */
         uint8_t c = r->data[r->pos++];
         result |= (uint64_t)(c & 0x7F) << shift;
         if (!(c & 0x80)) break;
         shift += 7;
+        if (shift > 63) return -1;                /* at most 10 bytes */
     }
     *out = (int64_t)((result >> 1) ^ -(int64_t)(result & 1));
     return 0;
@@ -884,6 +902,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema);
 
 static cJSON *decode_object(rdbuf_t *r, pfield_t *fields,
                             char **order, int field_count) {
+    if (rd_charge(r, 1 + (size_t)(field_count > 0 ? field_count : 0))) return NULL;
     cJSON *result = cJSON_CreateObject();
     if (!result) return NULL;
 
@@ -914,6 +933,7 @@ static cJSON *decode_object(rdbuf_t *r, pfield_t *fields,
     if (fb_len > 0) {
         const uint8_t *fb_data;
         if (rd_bytes(r, &fb_data, fb_len)) { cJSON_Delete(result); return NULL; }
+        if (rd_charge_json(r, fb_data, fb_len)) { cJSON_Delete(result); return NULL; }
         /* Parse the JSON fallback and merge */
         char *fb_str = (char *)malloc(fb_len + 1);
         if (fb_str) {
@@ -921,6 +941,11 @@ static cJSON *decode_object(rdbuf_t *r, pfield_t *fields,
             fb_str[fb_len] = '\0';
             cJSON *fb = cJSON_Parse(fb_str);
             free(fb_str);
+            if (!fb || !cJSON_IsObject(fb)) {     /* malformed: refuse, do not drop */
+                if (fb) cJSON_Delete(fb);
+                cJSON_Delete(result);
+                return NULL;
+            }
             if (fb && cJSON_IsObject(fb)) {
                 cJSON *child = fb->child;
                 while (child) {
@@ -1046,6 +1071,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
         if (rd_u16be(r, &slen)) return NULL;
         const uint8_t *data;
         if (rd_bytes(r, &data, slen)) return NULL;
+        if (rd_charge_json(r, data, slen)) return NULL;
         char *s = (char *)malloc(slen + 1);
         if (!s) return NULL;
         memcpy(s, data, slen);
@@ -1080,10 +1106,11 @@ static int brotli_compress_buf(const uint8_t *input, size_t input_len,
 }
 
 static int brotli_decompress_buf(const uint8_t *input, size_t input_len,
-                                 uint8_t **output, size_t *output_len) {
-    /* Start with 4x input size, grow if needed */
-    size_t out_cap = input_len * 4;
-    if (out_cap < 256) out_cap = 256;
+                                 uint8_t **output, size_t *output_len, size_t max_out) {
+    /* Start with 4x input size, grow if needed, never past max_out */
+    if (max_out == 0) return -1;
+    size_t out_cap = input_len > max_out / 4 ? max_out : input_len * 4;
+    if (out_cap < 256) out_cap = max_out < 256 ? max_out : 256;
     *output = (uint8_t *)malloc(out_cap);
     if (!*output) return -1;
 
@@ -1103,7 +1130,13 @@ static int brotli_decompress_buf(const uint8_t *input, size_t input_len,
         if (result == BROTLI_DECODER_RESULT_SUCCESS) break;
         if (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
             size_t written = next_out - *output;
-            out_cap *= 2;
+            if (out_cap >= max_out) {            /* would expand past the limit */
+                BrotliDecoderDestroyInstance(state);
+                free(*output);
+                *output = NULL;
+                return -1;
+            }
+            out_cap = out_cap > max_out / 2 ? max_out : out_cap * 2;
             uint8_t *nb = (uint8_t *)realloc(*output, out_cap);
             if (!nb) {
                 BrotliDecoderDestroyInstance(state);
@@ -1216,7 +1249,10 @@ static int same_value(const cJSON *a, const cJSON *b) {
  * payload would not give back the same data, return nothing: the caller
  * (every server module) then sends plain JSON. */
 static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root);
-static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len);
+static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len,
+                             const pidgin_limits_t *limits);
+/* Our own output, just encoded: no limits needed for the check. */
+static const pidgin_limits_t NO_LIMITS = { (size_t)-1, (size_t)-1 };
 
 pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     pidgin_buf_t result = { NULL, 0 };
@@ -1225,7 +1261,7 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     if (!root) return result;
     result = compress_unchecked(profile, root);
     if (result.data) {
-        cJSON *back = decode_payload(profile, result.data, result.len);
+        cJSON *back = decode_payload(profile, result.data, result.len, &NO_LIMITS);
         int ok = back && same_value(root, back);
         cJSON_Delete(back);
         if (!ok) {
@@ -1303,8 +1339,11 @@ static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root) {
     return result;
 }
 
-static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len) {
+static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len,
+                             const pidgin_limits_t *limits) {
     if (!profile || !data || len < 2) return NULL;
+    static const pidgin_limits_t defaults = { PIDGIN_MAX_OUTPUT, PIDGIN_MAX_ITEMS };
+    if (!limits) limits = &defaults;
 
     uint8_t brotli_flag = data[0];
     const uint8_t *payload = data + 1;
@@ -1315,16 +1354,19 @@ static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, siz
     if (brotli_flag == 0x01) {
 #if HAS_BROTLI
         size_t dec_len = 0;
-        if (brotli_decompress_buf(payload, payload_len, &decompressed, &dec_len) != 0)
+        if (brotli_decompress_buf(payload, payload_len, &decompressed, &dec_len,
+                                  limits->max_output) != 0)
             return NULL;
         payload = decompressed;
         payload_len = dec_len;
 #else
         return NULL;  /* brotli required but not available */
 #endif
+    } else if (brotli_flag != 0x00 || payload_len > limits->max_output) {
+        return NULL;
     }
 
-    rdbuf_t r = { payload, payload_len, 0 };
+    rdbuf_t r = { payload, payload_len, 0, limits->max_items };
 
     uint8_t type_marker;
     if (rd_u8(&r, &type_marker)) {
@@ -1363,7 +1405,12 @@ static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, siz
 }
 
 char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t len) {
-    cJSON *result = decode_payload(profile, data, len);
+    return pidgin_decompress_limits(profile, data, len, NULL);
+}
+
+char *pidgin_decompress_limits(pidgin_profile_t *profile, const uint8_t *data, size_t len,
+                               const pidgin_limits_t *limits) {
+    cJSON *result = decode_payload(profile, data, len, limits);
     if (!result) return NULL;
     char *json_out = cJSON_PrintUnformatted(result);
     cJSON_Delete(result);
