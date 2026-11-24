@@ -19,7 +19,7 @@ Secure channel (needs the crypto extra):
 from pidgin.ratchet import RatchetCipher
 from pidgin.schema_codec import PidginDecodeError, PidginEncodeError, SchemaCodec
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = [
     "SchemaCodec", "PidginEncodeError", "PidginDecodeError",
     "RatchetCipher", "SecureChannel",
