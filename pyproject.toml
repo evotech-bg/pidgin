@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pidgin-codec"
-version = "0.2.0"
+version = "0.2.1"
 description = "Runtime-learned binary encoding for JSON APIs: no .proto files, no code generation"
 requires-python = ">=3.10"
 license = "MIT"
@@ -28,7 +28,7 @@ classifiers = [
 ]
 keywords = ["compression", "json", "api", "protobuf", "binary", "schema", "codec"]
 dependencies = [
-    "brotli>=1.1.0",
+    "brotli>=1.2.0",
 ]
 
 [project.optional-dependencies]

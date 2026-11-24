@@ -19,8 +19,13 @@
  */
 
 // Core decoder
-export { PidginDecoder } from "./decoder.js";
-export type { BrotliDecompressFn } from "./decoder.js";
+export {
+  PidginDecoder,
+  PidginDecodeError,
+  DEFAULT_MAX_OUTPUT_BYTES,
+  DEFAULT_MAX_ITEMS,
+} from "./decoder.js";
+export type { BrotliDecompressFn, DecoderLimits } from "./decoder.js";
 
 // Fetch wrapper
 export { PidginClient, PidginFetchError } from "./fetch.js";

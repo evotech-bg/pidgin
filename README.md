@@ -64,6 +64,8 @@ original = codec.decompress(compressed)         # same data back
 profile_json = codec.profile.to_json()          # give this to clients
 ```
 
+`decompress` refuses payloads that expand past 32 MiB or hold more than 1,000,000 objects and values (`PidginDecodeError`), so a small hostile payload cannot exhaust memory. Change the limits with `SchemaCodec(profile, max_output=..., max_items=...)` or per call.
+
 ### FastAPI
 
 ```python
@@ -98,7 +100,7 @@ import { brotliDecompressSync } from "node:zlib";
 
 // profile: JSON text from /.well-known/pidgin/<endpoint>
 // body: the response bytes (Content-Encoding: pidgin)
-const decoder = PidginDecoder.fromJSON(profile, (b) => new Uint8Array(brotliDecompressSync(b)));
+const decoder = PidginDecoder.fromJSON(profile, (b, max) => new Uint8Array(brotliDecompressSync(b, { maxOutputLength: max })));
 const data = await decoder.decode(body);
 ```
 

@@ -14,6 +14,9 @@
  *  10. Unknown field fallback
  */
 
+#include <sys/resource.h>
+#include <pthread.h>
+#include "limit_data.h"
 #include "../include/pidgin.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -701,6 +704,207 @@ static void test_float_precision(void) {
     printf("  -> done\n\n");
 }
 
+/* Numbers above 1e9, below 1e-6 or integers above 1e15 used to be printed
+ * with "%e" (7 significant digits), both in the JSON fallback sections of
+ * the compressed payload and in decompress output: silently different data. */
+static void test_number_text_precision(void) {
+    printf("[number text precision]\n");
+    pidgin_profile_t *profile = pidgin_learn(
+        "[{\"id\":1,\"v\":1.5},{\"id\":2,\"v\":2.5},{\"id\":3,\"v\":3.5}]");
+    ASSERT(profile != NULL, "learn should succeed");
+    if (!profile) return;
+    const char *in = "{\"id\":7,\"v\":78185373126.77031,"
+        "\"meta\":{\"big\":12345678901.123,\"tiny\":1.23456789e-07,"
+        "\"snow\":1234567890123456,\"neg\":-98765432109.5}}";
+    pidgin_buf_t c = pidgin_compress(profile, in);
+    ASSERT(c.data != NULL, "compress should succeed");
+    if (c.data) {
+        char *d = pidgin_decompress(profile, c.data, c.len);
+        ASSERT(d != NULL, "decompress should succeed");
+        if (d) {
+            cJSON *root = cJSON_Parse(d);
+            cJSON *meta = root ? cJSON_GetObjectItem(root, "meta") : NULL;
+            cJSON *v = root ? cJSON_GetObjectItem(root, "v") : NULL;
+            ASSERT(v && v->valuedouble == 78185373126.77031, "schema float above 1e9 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "big")->valuedouble == 12345678901.123,
+                   "fallback float above 1e9 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "tiny")->valuedouble == 1.23456789e-07,
+                   "fallback float below 1e-6 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "snow")->valuedouble == 1234567890123456.0,
+                   "integer above 1e15 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "neg")->valuedouble == -98765432109.5,
+                   "negative float below -1e9 must be exact");
+            if (!(v && v->valuedouble == 78185373126.77031)) printf("  got: %s\n", d);
+            cJSON_Delete(root);
+            pidgin_free(d);
+        }
+    }
+    pidgin_buf_free(&c);
+    pidgin_profile_free(profile);
+    printf("  -> done\n\n");
+}
+
+/* An integer no double holds (2^53 + 1) must make the encoder refuse,
+ * so the server sends JSON instead of a rounded number. */
+static void test_refuse_inexact_integer(void) {
+    printf("[refuse inexact integer]\n");
+    pidgin_profile_t *profile = pidgin_learn(
+        "[{\"id\":1,\"v\":1.5},{\"id\":2,\"v\":2.5},{\"id\":3,\"v\":3.5}]");
+    ASSERT(profile != NULL, "learn should succeed");
+    if (!profile) return;
+    pidgin_buf_t c = pidgin_compress(profile, "{\"id\":9007199254740993,\"v\":1.5}");
+    ASSERT(c.data == NULL, "2^53+1 in an int field must be refused");
+    pidgin_buf_free(&c);
+    c = pidgin_compress(profile, "{\"id\":1,\"v\":1.5,\"m\":{\"s\":1234567890123456789}}");
+    ASSERT(c.data == NULL, "snowflake id in JSON text must be refused");
+    pidgin_buf_free(&c);
+    pidgin_profile_free(profile);
+    printf("  -> done\n\n");
+}
+
+
+/* ================================================================
+ * Decoding untrusted payloads: limits
+ * ================================================================ */
+
+static long max_rss_mib(void) {
+    struct rusage u;
+    getrusage(RUSAGE_SELF, &u);
+#ifdef __APPLE__
+    return (long)(u.ru_maxrss >> 20);          /* bytes on macOS */
+#else
+    return (long)(u.ru_maxrss >> 10);          /* KiB on Linux */
+#endif
+}
+
+static void test_limit_brotli_bomb(void) {
+    printf("[test_limit_brotli_bomb]\n");
+    pidgin_profile_t *p = pidgin_learn("[{\"id\":1,\"n\":\"a\"},{\"id\":2,\"n\":\"b\"}]");
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, bomb_brotli, sizeof bomb_brotli);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B, process grew %ld MiB\n", sizeof bomb_brotli, grew);
+    ASSERT(out == NULL, "a payload expanding past the output limit is refused");
+    ASSERT(grew < 48, "the process does not grow past the limit");
+    if (out) pidgin_free(out);
+    pidgin_profile_free(p);
+    printf("  -> done\n\n");
+}
+
+static void test_limit_records_bomb(void) {
+    printf("[test_limit_records_bomb]\n");
+    pidgin_profile_t *p = pidgin_learn("[{\"a\":[{\"k\":\"x\"}]},{\"a\":[{\"k\":\"x\"}]}]");
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    char *small = pidgin_decompress(p, small_records, sizeof small_records);
+    ASSERT(small && strcmp(small, "[{\"a\":[{\"k\":\"x\"},{\"k\":\"x\"}]},{\"a\":[{\"k\":\"x\"},{\"k\":\"x\"}]}]") == 0,
+           "the test layout decodes (2 x 2)");
+    if (small) pidgin_free(small);
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, bomb_records, sizeof bomb_records);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B, process grew %ld MiB\n", sizeof bomb_records, grew);
+    ASSERT(out == NULL, "a payload with more items than the limit is refused");
+    ASSERT(grew < 160, "the process does not grow without bound");
+    if (out) pidgin_free(out);
+#ifdef PIDGIN_DEFAULT_MAX_OUTPUT
+    pidgin_limits_t lim = { 1024 * 1024, 10, 1024 * 1024 };
+    char *few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few == NULL, "a lower item limit is honoured");
+    lim.max_items = 100;
+    few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few != NULL, "within the limit decodes");
+    if (few) pidgin_free(few);
+    lim.max_json = 40;      /* the 2 x 2 result is 72 bytes of JSON */
+    few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few == NULL, "a lower JSON text limit is honoured");
+    if (few) pidgin_free(few);
+#endif
+    pidgin_profile_free(p);
+    printf("  -> done\n\n");
+}
+
+static void test_limit_enum_text(void) {
+    printf("[test_limit_enum_text]\n");
+#ifdef PIDGIN_DEFAULT_MAX_OUTPUT
+    /* an enum whose value is a long string: one byte on the wire each */
+    size_t L = 60000;
+    char *samples = (char *)malloc(L * 3 + 200);
+    char *v = (char *)malloc(L + 1);
+    memset(v, 'x', L); v[L] = '\0';
+    /* two distinct values over six samples: learned as an enum */
+    sprintf(samples, "[{\"e\":\"%s\"},{\"e\":\"%s\"},{\"e\":\"%s\"},{\"e\":\"b\"},{\"e\":\"b\"},{\"e\":\"b\"}]",
+            v, v, v);
+    pidgin_profile_t *p = pidgin_learn(samples);
+    free(samples); free(v);
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    /* raw array of 60000 records, each one enum byte (index of the long value) + no fallback */
+    size_t n = 60000, len = 1 + 1 + 2 + n * 3;
+    uint8_t *buf = (uint8_t *)malloc(len);
+    buf[0] = 0x00; buf[1] = 0x02; buf[2] = (uint8_t)(n >> 8); buf[3] = (uint8_t)(n & 0xFF);
+    char *prof = pidgin_profile_to_json(p);
+    int long_first = prof && strstr(prof, "\"enum\":[\"x") != NULL;
+    if (prof) pidgin_free(prof);
+    for (size_t i = 0; i < n; i++) { buf[4 + i*3] = long_first ? 0 : 1; buf[5 + i*3] = 0; buf[6 + i*3] = 0; }
+    {   /* the same layout, 100 records, decodes when the text limit allows it */
+        uint8_t small[4 + 300];
+        memcpy(small, buf, 4 + 300); small[2] = 0; small[3] = 100;
+        pidgin_limits_t roomy = { PIDGIN_DEFAULT_MAX_OUTPUT, PIDGIN_DEFAULT_MAX_ITEMS, (size_t)-1 };
+        char *ok = pidgin_decompress_limits(p, small, sizeof small, &roomy);
+        ASSERT(ok && strlen(ok) > 100 * 60000, "100 long enum values decode with a roomy text limit");
+        if (ok) pidgin_free(ok);
+    }
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, buf, len);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B (would print %zu MiB), process grew %ld MiB\n", len, (n * 60000) >> 20, grew);
+    ASSERT(out == NULL, "JSON text past the limit is refused");
+    ASSERT(grew < 120, "the process does not grow past the text limit");
+    if (out) pidgin_free(out);
+    free(buf);
+    pidgin_profile_free(p);
+#endif
+    printf("  -> done\n\n");
+}
+
+#define DEEP 29000
+#define DEEP_JSON_LEN (5 + 2 * DEEP + 1)
+#define DEEP_LEN (1 + 1 + 1 + 2 + DEEP_JSON_LEN)
+static pidgin_profile_t *deep_profile;
+static void *deep_worker(void *arg) {
+    return pidgin_decompress(deep_profile, (const uint8_t *)arg, DEEP_LEN);
+}
+
+static void test_limit_deep_json(void) {
+    printf("[test_limit_deep_json]\n");
+    deep_profile = pidgin_learn("[{\"id\":1},{\"id\":2}]");
+    ASSERT(deep_profile != NULL, "learn");
+    if (!deep_profile) return;
+    /* raw single record: id = 0, then the fallback {"a":[[[...]]]} */
+    uint8_t *buf = (uint8_t *)malloc(DEEP_LEN);
+    size_t o = 0;
+    buf[o++] = 0x00; buf[o++] = 0x01; buf[o++] = 0x00;
+    buf[o++] = (uint8_t)(DEEP_JSON_LEN >> 8); buf[o++] = (uint8_t)(DEEP_JSON_LEN & 0xFF);
+    memcpy(buf + o, "{\"a\":", 5); o += 5;
+    memset(buf + o, '[', DEEP); o += DEEP;
+    memset(buf + o, ']', DEEP); o += DEEP;
+    buf[o++] = '}';
+    ASSERT(o == DEEP_LEN, "layout");
+    /* a worker thread with a small stack, like a server worker */
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 256 * 1024);
+    pthread_t th; void *res = (void *)1;
+    pthread_create(&th, &at, deep_worker, buf);
+    pthread_join(th, &res);
+    ASSERT(res == NULL, "deeply nested JSON in the fallback is refused, not a crash");
+    if (res) pidgin_free(res);
+    free(buf);
+    pidgin_profile_free(deep_profile);
+    printf("  -> done\n\n");
+}
+
 /* ================================================================
  * Main
  * ================================================================ */
@@ -721,6 +925,12 @@ int main(void) {
     test_version();
     test_varint_edgecases();
     test_float_precision();
+    test_number_text_precision();
+    test_refuse_inexact_integer();
+    test_limit_brotli_bomb();
+    test_limit_records_bomb();
+    test_limit_deep_json();
+    test_limit_enum_text();
 
     printf("=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

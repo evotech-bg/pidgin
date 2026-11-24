@@ -35,6 +35,12 @@ export function decodeZigZagVarint(data: Uint8Array, cursor: Cursor): number {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    if (cursor.offset >= data.length) {
+      throw new RangeError("varint truncated");
+    }
+    if (shift > 63) {
+      throw new RangeError("varint longer than 10 bytes");
+    }
     const byte = data[cursor.offset]!;
     cursor.offset += 1;
     // Accumulate 7 payload bits.  Use multiplication instead of `<<` for

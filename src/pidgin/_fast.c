@@ -279,174 +279,8 @@ py_encode_records(PyObject *self, PyObject *args)
     bf(&b); return res;
 }
 
-/* ================================================================
- * SCHEMA DECODE — mirror of encode, recursive
- *
- * decode_records(data: bytes, offset: int, count: int,
- *                names, types, nullable, enum_maps, sub_schemas)
- * -> (list[dict], new_offset)
- * ================================================================ */
-
-/* Read helpers */
-static long long rd_varint(const unsigned char *d, Py_ssize_t dl, Py_ssize_t *p) {
-    unsigned long long r=0; int sh=0;
-    while(*p<dl){unsigned char c=d[(*p)++]; r|=(unsigned long long)(c&0x7F)<<sh; if(!(c&0x80))break; sh+=7;}
-    return (long long)((r>>1)^-(long long)(r&1));
-}
-static unsigned short rd_u16be(const unsigned char *d, Py_ssize_t *p) {
-    unsigned short v=((unsigned short)d[*p]<<8)|d[*p+1]; *p+=2; return v;
-}
-
-/* Forward declaration */
-static PyObject *decode_one_record(const unsigned char *d, Py_ssize_t dl, Py_ssize_t *p,
-    PyObject *names, PyObject *types, PyObject *nullable,
-    PyObject *emaps, PyObject *subs);
-
-static PyObject *dec_val(const unsigned char *d, Py_ssize_t dl, Py_ssize_t *p,
-                         int ft, PyObject *fn, PyObject *emaps, PyObject *subs)
-{
-    switch(ft){
-    case T_BOOL: { int v=d[(*p)++]; return PyBool_FromLong(v); }
-    case T_INT:  { long long v=rd_varint(d,dl,p); return PyLong_FromLongLong(v); }
-    case T_FLT:  {
-        unsigned char t[8];
-#if defined(__BYTE_ORDER__)&&__BYTE_ORDER__==__ORDER_BIG_ENDIAN__
-        memcpy(t,d+*p,8);
-#else
-        for(int i=0;i<8;i++)t[i]=d[*p+7-i];
-#endif
-        *p+=8;
-        double v; memcpy(&v,t,8);
-        return PyFloat_FromDouble(v);
-    }
-    case T_STR: {
-        unsigned short sl=rd_u16be(d,p);
-        PyObject *s=PyUnicode_DecodeUTF8((const char*)(d+*p),sl,NULL);
-        *p+=sl; return s;
-    }
-    case T_ENUM: {
-        unsigned char idx=d[(*p)++];
-        if(idx==0xFE){
-            unsigned short sl=rd_u16be(d,p);
-            PyObject *s=PyUnicode_DecodeUTF8((const char*)(d+*p),sl,NULL);
-            *p+=sl; return s;
-        }
-        PyObject *el=PyDict_GetItem(emaps,fn);
-        if(el && idx<PyList_GET_SIZE(el)){
-            PyObject *v=PyList_GET_ITEM(el,idx);
-            Py_INCREF(v); return v;
-        }
-        Py_RETURN_NONE;
-    }
-    case T_TS: {
-        unsigned char sl=d[(*p)++];
-        PyObject *s=PyUnicode_DecodeUTF8((const char*)(d+*p),sl,NULL);
-        *p+=sl; return s;
-    }
-    case T_OBJ: {
-        PyObject *sub=PyDict_GetItem(subs,fn);
-        if(!sub){ Py_RETURN_NONE; }
-        return decode_one_record(d,dl,p,
-            PyTuple_GET_ITEM(sub,0),PyTuple_GET_ITEM(sub,1),
-            PyTuple_GET_ITEM(sub,2),PyTuple_GET_ITEM(sub,3),PyTuple_GET_ITEM(sub,4));
-    }
-    case T_ARR: {
-        PyObject *sub=PyDict_GetItem(subs,fn);
-        if(!sub){ Py_RETURN_NONE; }
-        unsigned short cnt=rd_u16be(d,p);
-        PyObject *lst=PyList_New(cnt);
-        if(!lst)return NULL;
-        PyObject *sn=PyTuple_GET_ITEM(sub,0),*st=PyTuple_GET_ITEM(sub,1),
-                 *snl=PyTuple_GET_ITEM(sub,2),*sem=PyTuple_GET_ITEM(sub,3),
-                 *ss=PyTuple_GET_ITEM(sub,4);
-        for(Py_ssize_t i=0;i<cnt;i++){
-            PyObject *item=decode_one_record(d,dl,p,sn,st,snl,sem,ss);
-            if(!item){Py_DECREF(lst);return NULL;}
-            PyList_SET_ITEM(lst,i,item);
-        }
-        return lst;
-    }
-    default: {
-        unsigned short sl=rd_u16be(d,p);
-        PyObject *raw=PyUnicode_DecodeUTF8((const char*)(d+*p),sl,NULL);
-        *p+=sl;
-        if(!raw)return NULL;
-        PyObject *jm=PyImport_ImportModule("json");
-        PyObject *fn2=PyObject_GetAttrString(jm,"loads"); Py_DECREF(jm);
-        PyObject *val=PyObject_CallFunctionObjArgs(fn2,raw,NULL);
-        Py_DECREF(fn2); Py_DECREF(raw);
-        return val;
-    }
-    }
-}
-
-static PyObject *decode_one_record(const unsigned char *d, Py_ssize_t dl, Py_ssize_t *p,
-    PyObject *names, PyObject *types, PyObject *nullable,
-    PyObject *emaps, PyObject *subs)
-{
-    PyObject *rec=PyDict_New();
-    if(!rec)return NULL;
-    Py_ssize_t nf=PyTuple_GET_SIZE(names);
-
-    for(Py_ssize_t f=0;f<nf;f++){
-        PyObject *fn=PyTuple_GET_ITEM(names,f);
-        int ft=(int)PyLong_AsLong(PyTuple_GET_ITEM(types,f));
-        int nl=PyObject_IsTrue(PyTuple_GET_ITEM(nullable,f));
-
-        if(nl){
-            unsigned char marker=d[(*p)++];
-            if(marker==M_NULL){ PyDict_SetItem(rec,fn,Py_None); continue; }
-            if(marker==M_ABSENT){ continue; }
-            /* M_PRESENT — fall through to decode value */
-        }
-        PyObject *val=dec_val(d,dl,p,ft,fn,emaps,subs);
-        if(!val){Py_DECREF(rec);return NULL;}
-        PyDict_SetItem(rec,fn,val);
-        Py_DECREF(val);
-    }
-    /* Unknown fields fallback */
-    unsigned short fb_len=rd_u16be(d,p);
-    if(fb_len>0){
-        PyObject *raw=PyUnicode_DecodeUTF8((const char*)(d+*p),fb_len,NULL);
-        *p+=fb_len;
-        if(raw){
-            PyObject *jm=PyImport_ImportModule("json");
-            PyObject *fn2=PyObject_GetAttrString(jm,"loads"); Py_DECREF(jm);
-            PyObject *fb=PyObject_CallFunctionObjArgs(fn2,raw,NULL);
-            Py_DECREF(fn2); Py_DECREF(raw);
-            if(fb && PyDict_Check(fb)){
-                PyObject *k,*v; Py_ssize_t pos=0;
-                while(PyDict_Next(fb,&pos,&k,&v)) PyDict_SetItem(rec,k,v);
-                Py_DECREF(fb);
-            }
-        }
-    }
-    return rec;
-}
-
-static PyObject *
-py_decode_records(PyObject *self, PyObject *args)
-{
-    const unsigned char *data; Py_ssize_t data_len;
-    Py_ssize_t offset; int count;
-    PyObject *names, *types, *nullable, *emaps, *subs;
-
-    if (!PyArg_ParseTuple(args,"y#niOOOOO",
-                          &data,&data_len,&offset,&count,
-                          &names,&types,&nullable,&emaps,&subs))
-        return NULL;
-
-    PyObject *lst=PyList_New(count);
-    if(!lst)return NULL;
-
-    Py_ssize_t p=offset;
-    for(int i=0;i<count;i++){
-        PyObject *rec=decode_one_record(data,data_len,&p,names,types,nullable,emaps,subs);
-        if(!rec){Py_DECREF(lst);return NULL;}
-        PyList_SET_ITEM(lst,i,rec);
-    }
-    return Py_BuildValue("(Nn)",lst,p);
-}
+/* Decoding has no C fast path: the Python decoder checks every length and
+ * limit (removed in 0.2.1; it had no bounds checks and was never reached). */
 
 /* ================================================================
  * EXPAND KEY — HKDF-like key expansion in C using Python hmac
@@ -519,7 +353,8 @@ static PyObject *py_decode_varint(PyObject *s, PyObject *a) {
     const unsigned char *d; Py_ssize_t dl,pos;
     if(!PyArg_ParseTuple(a,"y#n",&d,&dl,&pos))return NULL;
     unsigned long long r=0; int sh=0;
-    while(pos<dl){unsigned char c=d[pos++];r|=(unsigned long long)(c&0x7F)<<sh;if(!(c&0x80))break;sh+=7;}
+    while(pos<dl){unsigned char c=d[pos++];r|=(unsigned long long)(c&0x7F)<<sh;if(!(c&0x80))break;sh+=7;
+        if(sh>63){PyErr_SetString(PyExc_ValueError,"varint longer than 10 bytes");return NULL;}}
     return Py_BuildValue("(Ln)",(long long)((r>>1)^-(long long)(r&1)),pos);
 }
 
@@ -529,7 +364,6 @@ static PyObject *py_decode_varint(PyObject *s, PyObject *a) {
 static PyMethodDef methods[] = {
     {"ratchet_from_random", py_ratchet_from_random, METH_VARARGS, NULL},
     {"encode_records",      py_encode_records,      METH_VARARGS, NULL},
-    {"decode_records",      py_decode_records,      METH_VARARGS, NULL},
     {"expand_key",          py_expand_key,          METH_VARARGS, NULL},
     {"encode_varint",       py_encode_varint,       METH_VARARGS, NULL},
     {"decode_varint",       py_decode_varint,       METH_VARARGS, NULL},
