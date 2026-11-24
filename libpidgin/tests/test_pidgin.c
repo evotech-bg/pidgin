@@ -701,6 +701,64 @@ static void test_float_precision(void) {
     printf("  -> done\n\n");
 }
 
+/* Numbers above 1e9, below 1e-6 or integers above 1e15 used to be printed
+ * with "%e" (7 significant digits), both in the JSON fallback sections of
+ * the compressed payload and in decompress output: silently different data. */
+static void test_number_text_precision(void) {
+    printf("[number text precision]\n");
+    pidgin_profile_t *profile = pidgin_learn(
+        "[{\"id\":1,\"v\":1.5},{\"id\":2,\"v\":2.5},{\"id\":3,\"v\":3.5}]");
+    ASSERT(profile != NULL, "learn should succeed");
+    if (!profile) return;
+    const char *in = "{\"id\":7,\"v\":78185373126.77031,"
+        "\"meta\":{\"big\":12345678901.123,\"tiny\":1.23456789e-07,"
+        "\"snow\":1234567890123456,\"neg\":-98765432109.5}}";
+    pidgin_buf_t c = pidgin_compress(profile, in);
+    ASSERT(c.data != NULL, "compress should succeed");
+    if (c.data) {
+        char *d = pidgin_decompress(profile, c.data, c.len);
+        ASSERT(d != NULL, "decompress should succeed");
+        if (d) {
+            cJSON *root = cJSON_Parse(d);
+            cJSON *meta = root ? cJSON_GetObjectItem(root, "meta") : NULL;
+            cJSON *v = root ? cJSON_GetObjectItem(root, "v") : NULL;
+            ASSERT(v && v->valuedouble == 78185373126.77031, "schema float above 1e9 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "big")->valuedouble == 12345678901.123,
+                   "fallback float above 1e9 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "tiny")->valuedouble == 1.23456789e-07,
+                   "fallback float below 1e-6 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "snow")->valuedouble == 1234567890123456.0,
+                   "integer above 1e15 must be exact");
+            ASSERT(meta && cJSON_GetObjectItem(meta, "neg")->valuedouble == -98765432109.5,
+                   "negative float below -1e9 must be exact");
+            if (!(v && v->valuedouble == 78185373126.77031)) printf("  got: %s\n", d);
+            cJSON_Delete(root);
+            pidgin_free(d);
+        }
+    }
+    pidgin_buf_free(&c);
+    pidgin_profile_free(profile);
+    printf("  -> done\n\n");
+}
+
+/* An integer no double holds (2^53 + 1) must make the encoder refuse,
+ * so the server sends JSON instead of a rounded number. */
+static void test_refuse_inexact_integer(void) {
+    printf("[refuse inexact integer]\n");
+    pidgin_profile_t *profile = pidgin_learn(
+        "[{\"id\":1,\"v\":1.5},{\"id\":2,\"v\":2.5},{\"id\":3,\"v\":3.5}]");
+    ASSERT(profile != NULL, "learn should succeed");
+    if (!profile) return;
+    pidgin_buf_t c = pidgin_compress(profile, "{\"id\":9007199254740993,\"v\":1.5}");
+    ASSERT(c.data == NULL, "2^53+1 in an int field must be refused");
+    pidgin_buf_free(&c);
+    c = pidgin_compress(profile, "{\"id\":1,\"v\":1.5,\"m\":{\"s\":1234567890123456789}}");
+    ASSERT(c.data == NULL, "snowflake id in JSON text must be refused");
+    pidgin_buf_free(&c);
+    pidgin_profile_free(profile);
+    printf("  -> done\n\n");
+}
+
 /* ================================================================
  * Main
  * ================================================================ */
@@ -721,6 +779,8 @@ int main(void) {
     test_version();
     test_varint_edgecases();
     test_float_precision();
+    test_number_text_precision();
+    test_refuse_inexact_integer();
 
     printf("=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
