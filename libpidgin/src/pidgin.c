@@ -50,7 +50,7 @@
  * Version
  * ================================================================ */
 
-static const char *VERSION_STRING = "0.1.0";
+static const char *VERSION_STRING = "0.2.0";
 
 const char *pidgin_version(void) { return VERSION_STRING; }
 
@@ -734,6 +734,7 @@ static int encode_object(pbuf_t *b, cJSON *obj, pfield_t *fields,
         cJSON_Delete(unknown);
         if (!fallback) return -1;
         size_t fb_len = strlen(fallback);
+        if (fb_len > 0xFFFF) { free(fallback); return -1; }  /* length is 16 bits */
         if (pbuf_u16be(b, (uint16_t)fb_len)) { free(fallback); return -1; }
         if (pbuf_write(b, fallback, fb_len)) { free(fallback); return -1; }
         free(fallback);
@@ -848,6 +849,7 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
                     char *s = cJSON_PrintUnformatted(item);
                     if (!s) return -1;
                     size_t slen = strlen(s);
+                    if (slen > 0xFFFF) { free(s); return -1; }
                     if (pbuf_u16be(b, (uint16_t)slen)) { free(s); return -1; }
                     if (pbuf_write(b, s, slen)) { free(s); return -1; }
                     free(s);
@@ -864,6 +866,7 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
         char *s = cJSON_PrintUnformatted(val);
         if (!s) return -1;
         size_t slen = strlen(s);
+        if (slen > 0xFFFF) { free(s); return -1; }  /* length is 16 bits */
         if (pbuf_u16be(b, (uint16_t)slen)) { free(s); return -1; }
         if (pbuf_write(b, s, slen)) { free(s); return -1; }
         free(s);

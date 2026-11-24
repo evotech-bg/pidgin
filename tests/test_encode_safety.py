@@ -25,6 +25,8 @@ MUTATIONS = {
     "nested object is None": lambda r: dict(r, addr=None),
     "integer wider than 64 bits": lambda r: dict(r, id=2**70),
     "list in a string field": lambda r: dict(r, name=[1, 2]),
+    "string longer than 16-bit length": lambda r: dict(r, name="x" * 70000),
+    "unknown field longer than 16-bit length": lambda r: dict(r, extra="y" * 70000),
 }
 
 

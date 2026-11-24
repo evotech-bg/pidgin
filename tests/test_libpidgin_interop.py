@@ -87,7 +87,10 @@ def test_c_encodes_python_decodes(lib):
     lambda r: dict(r, name=[1, 2]),
     lambda r: dict(r, addr=None),
     lambda r: dict(r, lines=[1, 2]),
-], ids=["missing-field", "huge-int", "list-in-string", "object-none", "plain-values-in-object-array"])
+    lambda r: dict(r, tags=["x" * 70000]),          # JSON fallback longer than 16 bits
+    lambda r: dict(r, extra="y" * 70000),           # unknown field longer than 16 bits
+], ids=["missing-field", "huge-int", "list-in-string", "object-none", "plain-values-in-object-array",
+        "long-fallback", "long-unknown-field"])
 def test_c_refuses_data_that_does_not_fit(lib, mutate):
     eng = _engine(lib, RECORDS)
     try:

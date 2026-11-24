@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pidgin-codec"
-version = "0.1.0"
-description = "Runtime-learned compression that beats Protobuf — no .proto files, no codegen, zero config"
+version = "0.2.0"
+description = "Runtime-learned binary encoding for JSON APIs: no .proto files, no code generation"
 requires-python = ">=3.10"
 license = "MIT"
 readme = "README.md"
@@ -13,7 +13,7 @@ authors = [
     {name = "Ivo Gergov"},
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
 
     "Programming Language :: Python :: 3",
