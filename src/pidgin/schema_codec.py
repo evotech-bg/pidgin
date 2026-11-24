@@ -38,6 +38,16 @@ except ImportError:
     _c_decode_records = None
 
 
+# === Limits for decoding untrusted payloads ===
+
+#: Largest payload accepted after brotli (bytes). A payload that would
+#: decompress to more is refused, not truncated.
+DEFAULT_MAX_OUTPUT = 32 * 1024 * 1024
+#: Largest number of decoded items in one payload: every object counts one,
+#: and so does every field value in it (nested objects included).
+DEFAULT_MAX_ITEMS = 1_000_000
+
+
 # === Exceptions ===
 
 class PidginDecodeError(ValueError):
@@ -516,6 +526,34 @@ _MARKER_PRESENT = 0x01
 _MARKER_ABSENT = 0x00
 
 
+def _brotli_bounded(payload: bytes, limit: int) -> bytes:
+    """Brotli-decompress at most ``limit`` bytes; refuse anything larger."""
+    if not HAS_BROTLI:
+        raise PidginDecodeError("payload is brotli-compressed but brotli is not installed")
+    d = brotli.Decompressor()
+    out = bytearray()
+    try:
+        try:
+            chunk = d.process(payload, output_buffer_limit=min(limit + 1, 1 << 20))
+        except TypeError as e:
+            # brotli < 1.2 cannot stop early: refuse rather than expand without a cap
+            raise PidginDecodeError(
+                "brotli >= 1.2 is needed to decode brotli payloads safely") from e
+        out += chunk
+        while len(out) <= limit and not d.is_finished():
+            chunk = d.process(b"", output_buffer_limit=min(limit + 1 - len(out), 1 << 20))
+            if not chunk:
+                break
+            out += chunk
+    except brotli.error as e:
+        raise PidginDecodeError("brotli decompression failed") from e
+    if len(out) > limit:
+        raise PidginDecodeError(f"payload expands past max_output ({limit} bytes)")
+    if not d.is_finished():
+        raise PidginDecodeError("brotli stream truncated")
+    return bytes(out)
+
+
 class SchemaCodec:
     """Schema-aware JSON compressor.
 
@@ -540,9 +578,13 @@ class SchemaCodec:
         "array": 7,
     }
 
-    def __init__(self, profile: SchemaProfile, use_brotli: bool = True):
+    def __init__(self, profile: SchemaProfile, use_brotli: bool = True,
+                 max_output: int = DEFAULT_MAX_OUTPUT, max_items: int = DEFAULT_MAX_ITEMS):
         self.profile = profile
         self.use_brotli = use_brotli and HAS_BROTLI
+        #: decode limits; payloads above them raise PidginDecodeError
+        self.max_output = max_output
+        self.max_items = max_items
         self._c_schema = self._compile_c_schema() if _c_encode_records else None
 
     @classmethod
@@ -712,8 +754,14 @@ class SchemaCodec:
             return b"\x00" + raw
         return b"\x00" + raw
 
-    def decompress(self, data: bytes) -> dict | list[dict]:
+    def decompress(self, data: bytes, max_output: int | None = None,
+                   max_items: int | None = None) -> dict | list[dict]:
         """Decompress back to original JSON structure.
+
+        ``max_output`` (bytes after brotli) and ``max_items`` (objects and
+        field values, nested ones included) default to the codec's limits
+        (DEFAULT_MAX_OUTPUT, DEFAULT_MAX_ITEMS). A payload above either is
+        refused with PidginDecodeError before it is expanded further.
 
         Raises:
             PidginDecodeError: if the payload is truncated, has an invalid
@@ -726,30 +774,24 @@ class SchemaCodec:
             raise PidginDecodeError(f"input must be bytes, got {type(data).__name__}")
         if len(data) < 2:
             raise PidginDecodeError(f"payload too short: {len(data)} bytes (minimum 2)")
+        limit = self.max_output if max_output is None else max_output
+        budget = [self.max_items if max_items is None else max_items]
 
         try:
             brotli_flag = data[0]
             payload = data[1:]
 
             if brotli_flag == 0x01:
-                try:
-                    payload = brotli.decompress(payload)
-                except Exception as e:
-                    raise PidginDecodeError("brotli decompression failed") from e
+                payload = _brotli_bounded(payload, limit)
             elif brotli_flag != 0x00:
                 raise PidginDecodeError(f"invalid brotli flag byte: 0x{brotli_flag:02x}")
+            elif len(payload) > limit:
+                raise PidginDecodeError(f"payload larger than max_output ({limit} bytes)")
 
             if len(payload) == 0:
                 raise PidginDecodeError("payload is empty after header")
 
-            # C fast path for array records
-            if self._c_schema is not None and payload[0] == 0x02:
-                try:
-                    return _c_decode_records(payload, self._c_schema)
-                except Exception:
-                    pass  # Fall through to Python path
-
-            pos = [0]
+            pos = [0, budget]   # offset, and how many items may still be decoded
             marker = payload[pos[0]]
             pos[0] += 1
 
@@ -767,6 +809,8 @@ class SchemaCodec:
             raise
         except (IndexError, struct.error, json.JSONDecodeError, UnicodeDecodeError) as e:
             raise PidginDecodeError("payload truncated or malformed") from e
+        except RecursionError as e:
+            raise PidginDecodeError("payload nested too deeply") from e
 
     def _encode_object(self, obj: dict, fields: dict[str, FieldSchema], order: list[str], buf: bytearray):
         """Encode a single object according to schema — NO keys transmitted."""
@@ -805,6 +849,11 @@ class SchemaCodec:
 
     def _decode_object(self, data: bytes, pos: list[int], fields: dict[str, FieldSchema], order: list[str]) -> dict:
         """Decode a single object."""
+        if len(pos) > 1:
+            budget = pos[1]
+            budget[0] -= 1 + len(order)
+            if budget[0] < 0:
+                raise PidginDecodeError("payload has more items than max_items")
         result = {}
 
         for key in order:

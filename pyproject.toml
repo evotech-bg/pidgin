@@ -28,7 +28,7 @@ classifiers = [
 ]
 keywords = ["compression", "json", "api", "protobuf", "binary", "schema", "codec"]
 dependencies = [
-    "brotli>=1.1.0",
+    "brotli>=1.2.0",
 ]
 
 [project.optional-dependencies]
