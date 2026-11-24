@@ -26,7 +26,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test test/fixtures.test.mjs"
+    "test": "npm run build && node --test test/fixtures.test.mjs test/limits.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

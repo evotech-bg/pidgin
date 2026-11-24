@@ -98,7 +98,7 @@ import { brotliDecompressSync } from "node:zlib";
 
 // profile: JSON text from /.well-known/pidgin/<endpoint>
 // body: the response bytes (Content-Encoding: pidgin)
-const decoder = PidginDecoder.fromJSON(profile, (b) => new Uint8Array(brotliDecompressSync(b)));
+const decoder = PidginDecoder.fromJSON(profile, (b, max) => new Uint8Array(brotliDecompressSync(b, { maxOutputLength: max })));
 const data = await decoder.decode(body);
 ```
 

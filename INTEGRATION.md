@@ -165,7 +165,7 @@ npm install @pidgin/codec
 import { PidginDecoder } from "@pidgin/codec";
 import { brotliDecompressSync } from "node:zlib";
 
-const decoder = PidginDecoder.fromJSON(usersProfileJson, (b) => new Uint8Array(brotliDecompressSync(b)));
+const decoder = PidginDecoder.fromJSON(usersProfileJson, (b, max) => new Uint8Array(brotliDecompressSync(b, { maxOutputLength: max })));
 const users = await decoder.decode(responseBytes);
 ```
 

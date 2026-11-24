@@ -20,9 +20,11 @@ import { brotliDecompressSync } from "node:zlib";
 
 // profile: JSON text from /.well-known/pidgin/<endpoint> on the server
 // body: response bytes sent with Content-Encoding: pidgin
-const decoder = PidginDecoder.fromJSON(profile, (b) => new Uint8Array(brotliDecompressSync(b)));
+const decoder = PidginDecoder.fromJSON(profile, (b, max) => new Uint8Array(brotliDecompressSync(b, { maxOutputLength: max })));
 const data = await decoder.decode(body);
 ```
+
+Payloads from a source you do not control are decoded within limits: at most 32 MiB after brotli and at most 1,000,000 objects and values. Above them `decode` throws `PidginDecodeError`; change them with a third argument, for example `PidginDecoder.fromJSON(profile, brotli, { maxOutputBytes: 8 << 20, maxItems: 200_000 })`. The brotli function gets the output limit as its second argument; pass it on (as above with `maxOutputLength`) so a payload that expands too far stops early instead of being allocated first.
 
 Pass a brotli function. Without one the decoder uses `DecompressionStream("br")` when the runtime has it. Node 22 does not, so brotli payloads then fail with a clear error. `decodeSync()` works for payloads that are not brotli compressed.
 
