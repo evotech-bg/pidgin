@@ -19,6 +19,7 @@
 #include <float.h>
 #include <limits.h>
 #include <ctype.h>
+#include <errno.h>
 
 /* ================================================================
  * Types
@@ -39,6 +40,9 @@ typedef struct cJSON {
     char  *valuestring;         /* for strings */
     double valuedouble;         /* for numbers */
     long long valueint;         /* integer shortcut */
+    int    inexact;             /* number text that no double holds exactly
+                                   (integer beyond 2^53, overflow): the
+                                   encoder must refuse it, not round it */
     char  *string;              /* key name (in objects) */
 } cJSON;
 
@@ -122,7 +126,8 @@ cJSON *cJSON_CreateNumber(double num) {
     if (item) {
         item->type = CJSON_NUMBER;
         item->valuedouble = num;
-        item->valueint = (long long)num;
+        item->valueint = (num > -9223372036854775808.0 && num < 9223372036854775808.0)
+                         ? (long long)num : 0;
     }
     return item;
 }
@@ -373,11 +378,20 @@ static cJSON *parse_number(parse_buffer *b) {
     if (!item) return NULL;
     item->type = CJSON_NUMBER;
     item->valuedouble = d;
+    item->valueint = 0;
 
-    /* Store integer value if it fits */
-    if (!is_float && d >= (double)LLONG_MIN && d <= (double)LLONG_MAX) {
-        item->valueint = (long long)d;
-    } else {
+    if (d != d || d > DBL_MAX || d < -DBL_MAX) {
+        item->inexact = 1;                      /* 1e999 and the like */
+    } else if (!is_float) {
+        /* An integer literal is exact only if the double holds it. */
+        errno = 0;
+        long long ll = strtoll(start, NULL, 10);
+        if (errno == ERANGE || d < -9223372036854775808.0 || d >= 9223372036854775808.0
+            || (long long)d != ll) {
+            item->inexact = 1;
+        }
+        item->valueint = ll;
+    } else if (d > -9223372036854775808.0 && d < 9223372036854775808.0) {
         item->valueint = (long long)d;
     }
 
@@ -576,22 +590,26 @@ static int print_number(const cJSON *item, print_buffer *p) {
     char numbuf[64];
     double d = item->valuedouble;
 
+    /* JSON has no NaN or Infinity */
+    if (d != d || d > DBL_MAX || d < -DBL_MAX) {
+        return pb_append(p, "null", 4);
+    }
     if (d == 0.0) {
-        /* Check for integer zero vs float zero */
-        if (item->valueint == 0 && d == (double)item->valueint) {
-            return pb_char(p, '0');
-        }
+        return signbit(d) ? pb_append(p, "-0.0", 4) : pb_char(p, '0');  /* "-0" reads as integer 0 in Python */
     }
 
-    /* If integer value matches double, print as integer */
-    if (d == (double)item->valueint && d >= -1e15 && d <= 1e15) {
-        snprintf(numbuf, sizeof(numbuf), "%lld", item->valueint);
+    /* Whole numbers that a double holds exactly and that fit in 64 bits
+     * print as integers, digit for digit. */
+    if (d > -9223372036854775808.0 && d < 9223372036854775808.0
+        && d == (double)(long long)d) {
+        snprintf(numbuf, sizeof(numbuf), "%lld", (long long)d);
     } else {
-        /* Print as double — use enough precision */
-        if (fabs(d) < 1.0e-6 || fabs(d) > 1.0e9) {
-            snprintf(numbuf, sizeof(numbuf), "%e", d);
-        } else {
-            snprintf(numbuf, sizeof(numbuf), "%.17g", d);
+        /* Shortest text that reads back as exactly the same double.
+         * Before 24.11.2026 this was "%e" above 1e9 and below 1e-6, which
+         * kept 7 significant digits and silently changed the value. */
+        for (int prec = 15; prec <= 17; prec++) {
+            snprintf(numbuf, sizeof(numbuf), "%.*g", prec, d);
+            if (strtod(numbuf, NULL) == d) break;
         }
     }
     return pb_append(p, numbuf, strlen(numbuf));

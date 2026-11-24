@@ -50,7 +50,7 @@
  * Version
  * ================================================================ */
 
-static const char *VERSION_STRING = "0.2.0";
+static const char *VERSION_STRING = "0.2.1";
 
 const char *pidgin_version(void) { return VERSION_STRING; }
 
@@ -759,9 +759,10 @@ static int value_fits(const cJSON *val, const pfield_t *schema) {
     case DTYPE_BOOL:
         return cJSON_IsBool(val);
     case DTYPE_INT:
-        return cJSON_IsNumber(val) && val->valuedouble == (double)val->valueint;
+        return cJSON_IsNumber(val) && !val->inexact
+            && val->valuedouble == (double)val->valueint;
     case DTYPE_FLOAT:
-        return cJSON_IsNumber(val);
+        return cJSON_IsNumber(val) && !val->inexact;
     case DTYPE_STR:
     case DTYPE_ENUM:
         return cJSON_IsString(val) && val->valuestring
@@ -1159,16 +1160,72 @@ pidgin_profile_t *pidgin_learn(const char *json_samples) {
     return profile;
 }
 
+/* Same data, compared by value: numbers bit for bit (an inexact number
+ * never matches), strings byte for byte, objects by key in any order. */
+static int same_value(const cJSON *a, const cJSON *b) {
+    if (!a || !b) return 0;
+    int ta = a->type & 0xFF, tb = b->type & 0xFF;
+    if (ta != tb) return 0;
+    switch (ta) {
+    case CJSON_NUMBER:
+        if (a->inexact || b->inexact) return 0;
+        return memcmp(&a->valuedouble, &b->valuedouble, sizeof(double)) == 0;
+    case CJSON_STRING:
+        return a->valuestring && b->valuestring && strcmp(a->valuestring, b->valuestring) == 0;
+    case CJSON_ARRAY: {
+        const cJSON *x = a->child, *y = b->child;
+        for (; x && y; x = x->next, y = y->next)
+            if (!same_value(x, y)) return 0;
+        return !x && !y;
+    }
+    case CJSON_OBJECT: {
+        int na = 0, nb = 0;
+        for (const cJSON *x = a->child; x; x = x->next) na++;
+        for (const cJSON *y = b->child; y; y = y->next) nb++;
+        if (na != nb) return 0;
+        for (const cJSON *x = a->child; x; x = x->next) {
+            const cJSON *y = b->child;
+            while (y && strcmp(y->string, x->string) != 0) y = y->next;
+            if (!y || !same_value(x, y)) return 0;
+        }
+        return 1;
+    }
+    default:
+        return 1;  /* null, true, false: the type says it all */
+    }
+}
+
+/* Encode, then decode the result and compare it with the input. If the
+ * payload would not give back the same data, return nothing: the caller
+ * (every server module) then sends plain JSON. */
+static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root);
+static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len);
+
 pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     pidgin_buf_t result = { NULL, 0 };
     if (!profile || !json) return result;
-
     cJSON *root = cJSON_Parse(json);
     if (!root) return result;
+    result = compress_unchecked(profile, root);
+    if (result.data) {
+        cJSON *back = decode_payload(profile, result.data, result.len);
+        int ok = back && same_value(root, back);
+        cJSON_Delete(back);
+        if (!ok) {
+            free(result.data);
+            result.data = NULL;
+            result.len = 0;
+        }
+    }
+    cJSON_Delete(root);
+    return result;
+}
+
+static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root) {
+    pidgin_buf_t result = { NULL, 0 };
 
     pbuf_t buf;
     if (pbuf_init(&buf, 256)) {
-        cJSON_Delete(root);
         return result;
     }
 
@@ -1177,7 +1234,6 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
         int count = cJSON_GetArraySize(root);
         if (count > 0xFFFF) {  /* count is written as 16 bits */
             pbuf_free(&buf);
-            cJSON_Delete(root);
             return result;
         }
         pbuf_u16be(&buf, (uint16_t)count);
@@ -1186,8 +1242,7 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
             if (encode_object(&buf, item, profile->fields,
                               profile->field_order, profile->field_count)) {
                 pbuf_free(&buf);
-                cJSON_Delete(root);
-                return result;
+                    return result;
             }
         }
     } else {
@@ -1195,12 +1250,10 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
         if (encode_object(&buf, root, profile->fields,
                           profile->field_order, profile->field_count)) {
             pbuf_free(&buf);
-            cJSON_Delete(root);
             return result;
         }
     }
 
-    cJSON_Delete(root);
 
     /* Try brotli compression */
 #if HAS_BROTLI
@@ -1233,7 +1286,7 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     return result;
 }
 
-char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t len) {
+static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len) {
     if (!profile || !data || len < 2) return NULL;
 
     uint8_t brotli_flag = data[0];
@@ -1289,9 +1342,12 @@ char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t l
     }
 
     if (decompressed) free(decompressed);
+    return result;
+}
 
+char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t len) {
+    cJSON *result = decode_payload(profile, data, len);
     if (!result) return NULL;
-
     char *json_out = cJSON_PrintUnformatted(result);
     cJSON_Delete(result);
     return json_out;
