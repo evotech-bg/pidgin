@@ -75,10 +75,13 @@ char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t l
  * max_items:  largest number of decoded items: every object counts one and
  *             so does each field value in it, values inside the JSON
  *             section for unknown fields included.
- * A payload above either limit is refused (NULL), never truncated.
+ * max_json:   largest JSON text pidgin_decompress returns, in bytes (one
+ *             byte on the wire can stand for a long string from the
+ *             profile, so the text is counted separately).
+ * A payload above any limit is refused (NULL), never truncated.
  * pidgin_decompress() and pidgin_engine_decompress() use the defaults,
  * which can be changed at build time with -DPIDGIN_MAX_OUTPUT=... and
- * -DPIDGIN_MAX_ITEMS=...
+ * -DPIDGIN_MAX_ITEMS=... and -DPIDGIN_MAX_JSON=...
  */
 #ifndef PIDGIN_MAX_OUTPUT
 #define PIDGIN_MAX_OUTPUT (32u * 1024u * 1024u)
@@ -86,12 +89,16 @@ char *pidgin_decompress(pidgin_profile_t *profile, const uint8_t *data, size_t l
 #ifndef PIDGIN_MAX_ITEMS
 #define PIDGIN_MAX_ITEMS 1000000u
 #endif
+#ifndef PIDGIN_MAX_JSON
+#define PIDGIN_MAX_JSON (64u * 1024u * 1024u)
+#endif
 #define PIDGIN_DEFAULT_MAX_OUTPUT PIDGIN_MAX_OUTPUT
 #define PIDGIN_DEFAULT_MAX_ITEMS  PIDGIN_MAX_ITEMS
 
 typedef struct {
     size_t max_output;
     size_t max_items;
+    size_t max_json;
 } pidgin_limits_t;
 
 /* As pidgin_decompress(), with explicit limits (NULL means the defaults). */

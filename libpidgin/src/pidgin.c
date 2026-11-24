@@ -141,7 +141,26 @@ typedef struct {
     size_t         len;
     size_t         pos;
     size_t         budget;   /* items that may still be decoded */
+    size_t         text;     /* bytes of JSON text that may still be produced */
 } rdbuf_t;
+
+/* Take n bytes of JSON text from the budget; -1 when the result would be larger. */
+static int rd_text(rdbuf_t *r, size_t n) {
+    if (n > r->text) { r->text = 0; return -1; }
+    r->text -= n;
+    return 0;
+}
+
+/* JSON text of a string value: quotes plus escapes, as the printer writes it. */
+static size_t json_str_len(const uint8_t *s, size_t n) {
+    size_t out = 2;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < 0x20) out += 6;
+        else if (s[i] == '"' || s[i] == '\\') out += 2;
+        else out += 1;
+    }
+    return out;
+}
 
 /* Take n items from the budget; -1 when the payload asks for more. */
 static int rd_charge(rdbuf_t *r, size_t n) {
@@ -155,6 +174,8 @@ static int rd_charge_json(rdbuf_t *r, const uint8_t *s, size_t n) {
     size_t items = 1;
     for (size_t i = 0; i < n; i++)
         if (s[i] == '[' || s[i] == '{' || s[i] == ',' || s[i] == ':') items++;
+    /* printed again after parsing: numbers can grow ("1e9"), so count 6x */
+    if (rd_text(r, n > ((size_t)-1) / 6 ? (size_t)-1 : n * 6)) return -1;
     return rd_charge(r, items);
 }
 
@@ -903,6 +924,12 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema);
 static cJSON *decode_object(rdbuf_t *r, pfield_t *fields,
                             char **order, int field_count) {
     if (rd_charge(r, 1 + (size_t)(field_count > 0 ? field_count : 0))) return NULL;
+    {
+        size_t t = 2;                                   /* {} */
+        for (int i = 0; i < field_count; i++)
+            t += json_str_len((const uint8_t *)order[i], strlen(order[i])) + 2;  /* "k": and , */
+        if (rd_text(r, t)) return NULL;
+    }
     cJSON *result = cJSON_CreateObject();
     if (!result) return NULL;
 
@@ -914,6 +941,7 @@ static cJSON *decode_object(rdbuf_t *r, pfield_t *fields,
             uint8_t marker;
             if (rd_u8(r, &marker)) { cJSON_Delete(result); return NULL; }
             if (marker == MARKER_NULL) {
+                if (rd_text(r, 4)) { cJSON_Delete(result); return NULL; }
                 cJSON_AddItemToObject(result, order[i], cJSON_CreateNull());
                 continue;
             } else if (marker == MARKER_ABSENT) {
@@ -975,12 +1003,14 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
     case DTYPE_BOOL: {
         uint8_t v;
         if (rd_u8(r, &v)) return NULL;
+        if (rd_text(r, 5)) return NULL;
         return v ? cJSON_CreateTrue() : cJSON_CreateFalse();
     }
 
     case DTYPE_INT: {
         int64_t v;
         if (rd_varint(r, &v)) return NULL;
+        if (rd_text(r, 21)) return NULL;
         cJSON *item = cJSON_CreateNumber((double)v);
         if (item) item->valueint = v;
         return item;
@@ -989,6 +1019,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
     case DTYPE_FLOAT: {
         double v;
         if (rd_double(r, &v)) return NULL;
+        if (rd_text(r, 26)) return NULL;
         return cJSON_CreateNumber(v);
     }
 
@@ -997,6 +1028,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
         if (rd_u16be(r, &slen)) return NULL;
         const uint8_t *data;
         if (rd_bytes(r, &data, slen)) return NULL;
+        if (rd_text(r, json_str_len(data, slen))) return NULL;
         char *s = (char *)malloc(slen + 1);
         if (!s) return NULL;
         memcpy(s, data, slen);
@@ -1015,6 +1047,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
             if (rd_u16be(r, &slen)) return NULL;
             const uint8_t *data;
             if (rd_bytes(r, &data, slen)) return NULL;
+            if (rd_text(r, json_str_len(data, slen))) return NULL;
             char *s = (char *)malloc(slen + 1);
             if (!s) return NULL;
             memcpy(s, data, slen);
@@ -1024,8 +1057,11 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
             return item;
         }
         if (idx < schema->enum_count) {
-            return cJSON_CreateString(schema->enum_values[idx]);
+            const char *ev = schema->enum_values[idx];
+            if (rd_text(r, json_str_len((const uint8_t *)ev, strlen(ev)))) return NULL;
+            return cJSON_CreateString(ev);
         }
+        if (rd_text(r, 4)) return NULL;
         return cJSON_CreateNull();
     }
 
@@ -1034,6 +1070,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
         if (rd_u8(r, &slen)) return NULL;
         const uint8_t *data;
         if (rd_bytes(r, &data, slen)) return NULL;
+        if (rd_text(r, json_str_len(data, slen))) return NULL;
         char *s = (char *)malloc(slen + 1);
         if (!s) return NULL;
         memcpy(s, data, slen);
@@ -1053,6 +1090,7 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
         {
             uint16_t count;
             if (rd_u16be(r, &count)) return NULL;
+            if (rd_text(r, 2)) return NULL;
             cJSON *arr = cJSON_CreateArray();
             if (!arr) return NULL;
             for (int i = 0; i < count; i++) {
@@ -1252,7 +1290,7 @@ static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root);
 static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len,
                              const pidgin_limits_t *limits);
 /* Our own output, just encoded: no limits needed for the check. */
-static const pidgin_limits_t NO_LIMITS = { (size_t)-1, (size_t)-1 };
+static const pidgin_limits_t NO_LIMITS = { (size_t)-1, (size_t)-1, (size_t)-1 };
 
 pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     pidgin_buf_t result = { NULL, 0 };
@@ -1342,7 +1380,7 @@ static pidgin_buf_t compress_unchecked(pidgin_profile_t *profile, cJSON *root) {
 static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, size_t len,
                              const pidgin_limits_t *limits) {
     if (!profile || !data || len < 2) return NULL;
-    static const pidgin_limits_t defaults = { PIDGIN_MAX_OUTPUT, PIDGIN_MAX_ITEMS };
+    static const pidgin_limits_t defaults = { PIDGIN_MAX_OUTPUT, PIDGIN_MAX_ITEMS, PIDGIN_MAX_JSON };
     if (!limits) limits = &defaults;
 
     uint8_t brotli_flag = data[0];
@@ -1366,7 +1404,7 @@ static cJSON *decode_payload(pidgin_profile_t *profile, const uint8_t *data, siz
         return NULL;
     }
 
-    rdbuf_t r = { payload, payload_len, 0, limits->max_items };
+    rdbuf_t r = { payload, payload_len, 0, limits->max_items, limits->max_json };
 
     uint8_t type_marker;
     if (rd_u8(&r, &type_marker)) {

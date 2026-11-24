@@ -810,15 +810,63 @@ static void test_limit_records_bomb(void) {
     ASSERT(grew < 160, "the process does not grow without bound");
     if (out) pidgin_free(out);
 #ifdef PIDGIN_DEFAULT_MAX_OUTPUT
-    pidgin_limits_t lim = { 1024 * 1024, 10 };
+    pidgin_limits_t lim = { 1024 * 1024, 10, 1024 * 1024 };
     char *few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
     ASSERT(few == NULL, "a lower item limit is honoured");
     lim.max_items = 100;
     few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
     ASSERT(few != NULL, "within the limit decodes");
     if (few) pidgin_free(few);
+    lim.max_json = 40;      /* the 2 x 2 result is 72 bytes of JSON */
+    few = pidgin_decompress_limits(p, small_records, sizeof small_records, &lim);
+    ASSERT(few == NULL, "a lower JSON text limit is honoured");
+    if (few) pidgin_free(few);
 #endif
     pidgin_profile_free(p);
+    printf("  -> done\n\n");
+}
+
+static void test_limit_enum_text(void) {
+    printf("[test_limit_enum_text]\n");
+#ifdef PIDGIN_DEFAULT_MAX_OUTPUT
+    /* an enum whose value is a long string: one byte on the wire each */
+    size_t L = 60000;
+    char *samples = (char *)malloc(L * 3 + 200);
+    char *v = (char *)malloc(L + 1);
+    memset(v, 'x', L); v[L] = '\0';
+    /* two distinct values over six samples: learned as an enum */
+    sprintf(samples, "[{\"e\":\"%s\"},{\"e\":\"%s\"},{\"e\":\"%s\"},{\"e\":\"b\"},{\"e\":\"b\"},{\"e\":\"b\"}]",
+            v, v, v);
+    pidgin_profile_t *p = pidgin_learn(samples);
+    free(samples); free(v);
+    ASSERT(p != NULL, "learn");
+    if (!p) return;
+    /* raw array of 60000 records, each one enum byte (index of the long value) + no fallback */
+    size_t n = 60000, len = 1 + 1 + 2 + n * 3;
+    uint8_t *buf = (uint8_t *)malloc(len);
+    buf[0] = 0x00; buf[1] = 0x02; buf[2] = (uint8_t)(n >> 8); buf[3] = (uint8_t)(n & 0xFF);
+    char *prof = pidgin_profile_to_json(p);
+    int long_first = prof && strstr(prof, "\"enum\":[\"x") != NULL;
+    if (prof) pidgin_free(prof);
+    for (size_t i = 0; i < n; i++) { buf[4 + i*3] = long_first ? 0 : 1; buf[5 + i*3] = 0; buf[6 + i*3] = 0; }
+    {   /* the same layout, 100 records, decodes when the text limit allows it */
+        uint8_t small[4 + 300];
+        memcpy(small, buf, 4 + 300); small[2] = 0; small[3] = 100;
+        pidgin_limits_t roomy = { PIDGIN_DEFAULT_MAX_OUTPUT, PIDGIN_DEFAULT_MAX_ITEMS, (size_t)-1 };
+        char *ok = pidgin_decompress_limits(p, small, sizeof small, &roomy);
+        ASSERT(ok && strlen(ok) > 100 * 60000, "100 long enum values decode with a roomy text limit");
+        if (ok) pidgin_free(ok);
+    }
+    long before = max_rss_mib();
+    char *out = pidgin_decompress(p, buf, len);
+    long grew = max_rss_mib() - before;
+    printf("  wire %zu B (would print %zu MiB), process grew %ld MiB\n", len, (n * 60000) >> 20, grew);
+    ASSERT(out == NULL, "JSON text past the limit is refused");
+    ASSERT(grew < 120, "the process does not grow past the text limit");
+    if (out) pidgin_free(out);
+    free(buf);
+    pidgin_profile_free(p);
+#endif
     printf("  -> done\n\n");
 }
 
@@ -882,6 +930,7 @@ int main(void) {
     test_limit_brotli_bomb();
     test_limit_records_bomb();
     test_limit_deep_json();
+    test_limit_enum_text();
 
     printf("=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
