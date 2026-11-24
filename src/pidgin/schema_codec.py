@@ -32,10 +32,8 @@ except ImportError:
 
 try:
     from pidgin._fast import encode_records as _c_encode_records
-    from pidgin._fast import decode_records as _c_decode_records
 except ImportError:
     _c_encode_records = None
-    _c_decode_records = None
 
 
 # === Limits for decoding untrusted payloads ===

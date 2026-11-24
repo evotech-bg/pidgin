@@ -15,7 +15,7 @@
 ### Changed
 
 - pidgin-codec requires `brotli>=1.2.0` (for bounded decoding).
-- The Python decoder no longer calls the C fast path for decoding: the call had the wrong arguments and always fell back to Python, so nothing changes in behaviour or speed. The C extension's decode function itself has no bounds checks and is not reachable from the public API.
+- The C extension no longer has a decode function (`pidgin._fast.decode_records`). It read without bounds checks; the Python decoder called it with the wrong arguments, so it always fell back to Python and was never used. Behaviour and speed do not change. `pidgin._fast.decode_varint` refuses varints longer than 10 bytes.
 
 ### Added
 
