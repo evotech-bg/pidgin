@@ -102,3 +102,36 @@ def test_ordinary_payloads_unchanged():
                  {"id": 2, "name": "b" * 5000, "tags": []},
                  [{"id": i, "name": str(i), "tags": [{"k": "a"}] * 3} for i in range(1000)]):
         assert c.decompress(c.compress(data)) == data
+
+
+def _single(c, tail):
+    """Single record with every known field empty, then ``tail`` as the fallback section."""
+    body = bytearray(b"\x01")
+    for key in c.profile.field_order:
+        f = c.profile.fields[key]
+        if f.nullable:
+            body.append(0x00)
+            continue
+        body += {"int": b"\x00", "str": b"\x00\x00", "array": b"\x00\x00"}.get(f.dtype, b"\x00\x00")
+    return bytes(body) + tail
+
+
+def test_json_fallback_counts_against_items():
+    c = _codec()
+    blob = b'{"x":[' + b",".join([b"[]"] * 20000) + b"]}"
+    p = b"\x00" + _single(c, struct.pack(">H", len(blob)) + blob)
+    with pytest.raises(PidginDecodeError):
+        c.decompress(p, max_items=1000)
+    assert len(c.decompress(p)["x"]) == 20000   # within the default limit it decodes
+    bad = b"[1,2]"   # the fallback section must be an object
+    with pytest.raises(PidginDecodeError):
+        c.decompress(b"\x00" + _single(c, struct.pack(">H", len(bad)) + bad))
+
+
+def test_long_varint_refused():
+    c = _codec()
+    key = c.profile.field_order[0]
+    assert c.profile.fields[key].dtype == "int" and not c.profile.fields[key].nullable
+    payload = b"\x00\x01" + b"\x80" * 100000 + b"\x00"
+    with pytest.raises(PidginDecodeError):
+        c.decompress(payload)

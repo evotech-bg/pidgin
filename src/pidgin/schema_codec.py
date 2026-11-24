@@ -554,6 +554,18 @@ def _brotli_bounded(payload: bytes, limit: int) -> bytes:
     return bytes(out)
 
 
+def _charge_json(pos: list, blob: bytes) -> None:
+    """Count a JSON fallback blob against the item budget before parsing it.
+
+    Every value json.loads can create starts after '[', '{', ',' or ':' (or
+    at the very start), so that count plus one bounds the items it makes."""
+    if len(pos) > 1:
+        budget = pos[1]
+        budget[0] -= 1 + blob.count(b"[") + blob.count(b"{") + blob.count(b",") + blob.count(b":")
+        if budget[0] < 0:
+            raise PidginDecodeError("payload has more items than max_items")
+
+
 class SchemaCodec:
     """Schema-aware JSON compressor.
 
@@ -874,8 +886,11 @@ class SchemaCodec:
         fb_len = struct.unpack(">H", data[pos[0]:pos[0]+2])[0]
         pos[0] += 2
         if fb_len > 0:
+            _charge_json(pos, data[pos[0]:pos[0]+fb_len])
             fallback = json.loads(data[pos[0]:pos[0]+fb_len])
             pos[0] += fb_len
+            if not isinstance(fallback, dict):
+                raise PidginDecodeError("unknown-fields section is not a JSON object")
             result.update(fallback)
 
         return result
@@ -1015,6 +1030,7 @@ class SchemaCodec:
         else:
             slen = struct.unpack(">H", data[pos[0]:pos[0]+2])[0]
             pos[0] += 2
+            _charge_json(pos, data[pos[0]:pos[0]+slen])
             val = json.loads(data[pos[0]:pos[0]+slen])
             pos[0] += slen
             return val
@@ -1043,5 +1059,7 @@ class SchemaCodec:
             if not (byte & 0x80):
                 break
             shift += 7
+            if shift > 63:   # the encoder writes at most 10 bytes (64-bit zigzag)
+                raise PidginDecodeError("varint longer than 10 bytes")
         # Undo ZigZag: unsigned back to signed
         return (result >> 1) ^ -(result & 1)
