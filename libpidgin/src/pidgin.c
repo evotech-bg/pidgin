@@ -1162,6 +1162,11 @@ pidgin_profile_t *pidgin_learn(const char *json_samples) {
 
 /* Same data, compared by value: numbers bit for bit (an inexact number
  * never matches), strings byte for byte, objects by key in any order. */
+static int cmp_key(const void *x, const void *y) {
+    const char *a = (*(const cJSON *const *)x)->string, *b = (*(const cJSON *const *)y)->string;
+    return strcmp(a ? a : "", b ? b : "");
+}
+
 static int same_value(const cJSON *a, const cJSON *b) {
     if (!a || !b) return 0;
     int ta = a->type & 0xFF, tb = b->type & 0xFF;
@@ -1179,16 +1184,28 @@ static int same_value(const cJSON *a, const cJSON *b) {
         return !x && !y;
     }
     case CJSON_OBJECT: {
-        int na = 0, nb = 0;
+        /* Sort both key lists and walk them together: n log n, so a
+         * response with a huge object cannot make this quadratic. */
+        size_t na = 0, nb = 0;
         for (const cJSON *x = a->child; x; x = x->next) na++;
         for (const cJSON *y = b->child; y; y = y->next) nb++;
         if (na != nb) return 0;
-        for (const cJSON *x = a->child; x; x = x->next) {
-            const cJSON *y = b->child;
-            while (y && strcmp(y->string, x->string) != 0) y = y->next;
-            if (!y || !same_value(x, y)) return 0;
+        if (na == 0) return 1;
+        const cJSON **ka = malloc(na * sizeof *ka), **kb = malloc(nb * sizeof *kb);
+        if (!ka || !kb) { free(ka); free(kb); return 0; }
+        size_t i = 0;
+        for (const cJSON *x = a->child; x; x = x->next) ka[i++] = x;
+        i = 0;
+        for (const cJSON *y = b->child; y; y = y->next) kb[i++] = y;
+        qsort(ka, na, sizeof *ka, cmp_key);
+        qsort(kb, nb, sizeof *kb, cmp_key);
+        int ok = 1;
+        for (i = 0; ok && i < na; i++) {
+            ok = ka[i]->string && kb[i]->string && strcmp(ka[i]->string, kb[i]->string) == 0
+                 && same_value(ka[i], kb[i]);
         }
-        return 1;
+        free(ka); free(kb);
+        return ok;
     }
     default:
         return 1;  /* null, true, false: the type says it all */
