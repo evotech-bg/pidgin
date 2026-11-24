@@ -50,6 +50,10 @@ class PidginDecodeError(ValueError):
     """
 
 
+class PidginEncodeError(ValueError):
+    """Raised when data cannot be encoded so that it decodes back unchanged."""
+
+
 # === Schema Types ===
 
 @dataclass
@@ -642,11 +646,38 @@ class SchemaCodec:
             tuple(sub_schemas),
         )
 
-    def compress(self, data: dict | list[dict]) -> bytes:
+    def compress(self, data: dict | list[dict], verify: bool = True) -> bytes:
         """Compress a JSON response using learned schema.
 
         Supports single object or array of objects.
+
+        With verify=True (the default) the payload is decoded again and
+        compared with the input. Some inputs do not fit the profile in a way
+        the encoder cannot represent: a required field that is missing, an
+        integer wider than 64 bits, a list in a string field. Without the
+        check they would decode to different data. With it, compress raises
+        PidginEncodeError and the caller can send plain JSON instead.
+        verify=False skips the check and roughly halves the cost; use it only
+        when the data is known to match the profile.
+
+        Raises:
+            PidginEncodeError: if verify is on and the payload would not
+                decode to the same data.
         """
+        payload = self._compress_unchecked(data)
+        if verify:
+            try:
+                same = self.decompress(payload) == data
+            except PidginDecodeError:
+                same = False
+            if not same:
+                raise PidginEncodeError(
+                    "data does not fit the learned profile; send it as JSON "
+                    "or evolve the profile"
+                )
+        return payload
+
+    def _compress_unchecked(self, data: dict | list[dict]) -> bytes:
         # C fast path for list of records
         if isinstance(data, list) and self._c_schema is not None:
             try:

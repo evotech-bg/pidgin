@@ -745,7 +745,47 @@ static int encode_object(pbuf_t *b, cJSON *obj, pfield_t *fields,
     return 0;
 }
 
+/*
+ * Does this value fit the field schema so that it decodes back unchanged?
+ * A missing required field, a wrong type, an integer outside int range or
+ * a length the wire format cannot hold would otherwise crash the encoder
+ * (NULL value) or decode to different data. The caller then fails the
+ * whole compress call and the server sends plain JSON.
+ */
+static int value_fits(const cJSON *val, const pfield_t *schema) {
+    if (!val) return 0;
+    switch (schema->dtype) {
+    case DTYPE_BOOL:
+        return cJSON_IsBool(val);
+    case DTYPE_INT:
+        return cJSON_IsNumber(val) && val->valuedouble == (double)val->valueint;
+    case DTYPE_FLOAT:
+        return cJSON_IsNumber(val);
+    case DTYPE_STR:
+    case DTYPE_ENUM:
+        return cJSON_IsString(val) && val->valuestring
+            && strlen(val->valuestring) <= 0xFFFF;
+    case DTYPE_TIMESTAMP:
+        return cJSON_IsString(val) && val->valuestring
+            && strlen(val->valuestring) <= 0xFF;
+    case DTYPE_OBJECT:
+        if (!schema->nested) return 1;  /* JSON fallback */
+        return cJSON_IsObject(val);
+    case DTYPE_ARRAY: {
+        if (!schema->items) return 1;  /* JSON fallback */
+        if (!cJSON_IsArray(val) || cJSON_GetArraySize(val) > 0xFFFF) return 0;
+        for (const cJSON *it = val->child; it; it = it->next) {
+            if (!cJSON_IsObject(it)) return 0;
+        }
+        return 1;
+    }
+    default:
+        return 1;  /* written as JSON fallback */
+    }
+}
+
 static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
+    if (!value_fits(val, schema)) return -1;
     switch (schema->dtype) {
     case DTYPE_BOOL:
         return pbuf_u8(b, cJSON_IsTrue(val) ? 1 : 0);
@@ -786,15 +826,15 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
     }
 
     case DTYPE_OBJECT:
-        if (schema->nested && cJSON_IsObject(val)) {
-            return encode_object(b, val, schema->nested,
-                                schema->nested_order, schema->nested_count);
-        } else {
-            return pbuf_u16be(b, 0);
-        }
+        /* Without a nested schema the value goes as JSON, as in Python */
+        if (!schema->nested) goto json_fallback;
+        return encode_object(b, val, schema->nested,
+                            schema->nested_order, schema->nested_count);
 
     case DTYPE_ARRAY:
-        if (schema->items && cJSON_IsArray(val)) {
+        /* Arrays of plain values have no items schema: JSON, as in Python */
+        if (!schema->items) goto json_fallback;
+        if (cJSON_IsArray(val)) {
             int count = cJSON_GetArraySize(val);
             if (pbuf_u16be(b, (uint16_t)count)) return -1;
             for (int i = 0; i < count; i++) {
@@ -818,7 +858,8 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
             return pbuf_u16be(b, 0);
         }
 
-    default: {
+    default:
+    json_fallback: {
         /* JSON fallback */
         char *s = cJSON_PrintUnformatted(val);
         if (!s) return -1;
@@ -974,14 +1015,13 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
     }
 
     case DTYPE_OBJECT:
-        if (schema->nested) {
-            return decode_object(r, schema->nested,
-                                schema->nested_order, schema->nested_count);
-        }
-        return cJSON_CreateNull();
+        if (!schema->nested) goto json_fallback;
+        return decode_object(r, schema->nested,
+                            schema->nested_order, schema->nested_count);
 
     case DTYPE_ARRAY:
-        if (schema->items) {
+        if (!schema->items) goto json_fallback;
+        {
             uint16_t count;
             if (rd_u16be(r, &count)) return NULL;
             cJSON *arr = cJSON_CreateArray();
@@ -994,9 +1034,9 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
             }
             return arr;
         }
-        return cJSON_CreateNull();
 
-    default: {
+    default:
+    json_fallback: {
         /* JSON fallback */
         uint16_t slen;
         if (rd_u16be(r, &slen)) return NULL;
@@ -1132,6 +1172,11 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     if (cJSON_IsArray(root)) {
         pbuf_u8(&buf, 0x02);  /* array marker */
         int count = cJSON_GetArraySize(root);
+        if (count > 0xFFFF) {  /* count is written as 16 bits */
+            pbuf_free(&buf);
+            cJSON_Delete(root);
+            return result;
+        }
         pbuf_u16be(&buf, (uint16_t)count);
         for (int i = 0; i < count; i++) {
             cJSON *item = cJSON_GetArrayItem(root, i);
