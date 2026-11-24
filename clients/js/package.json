@@ -1,6 +1,6 @@
 {
   "name": "@pidgin/codec",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "JavaScript/TypeScript client decoder for Pidgin SchemaCodec binary wire format",
   "type": "module",
   "main": "./dist/cjs/index.cjs",
@@ -20,11 +20,13 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/fixtures.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

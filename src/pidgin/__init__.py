@@ -1,8 +1,4 @@
-"""Pidgin — Dual-layer compression for AI communication.
-
-Semantic compression (AI-to-AI):
-    from pidgin import Protocol
-    prompt = Protocol().system_prompt("bidirectional")
+"""Pidgin: runtime-learned compression for JSON APIs.
 
 Schema-aware API compression:
     from pidgin import SchemaCodec
@@ -10,37 +6,27 @@ Schema-aware API compression:
     compressed = codec.compress(response)
     original = codec.decompress(compressed)
 
-Ratchet cipher (forward secrecy):
+Ratchet cipher (needs the crypto extra):
     from pidgin import RatchetCipher
     cipher = RatchetCipher(shared_secret=b"key")
     encrypted = cipher.encrypt(data)
 
-Secure channel (compress + encrypt + authenticate):
+Secure channel (needs the crypto extra):
     from pidgin import SecureChannel
     channel = SecureChannel.create("alice")
-
-LLM-powered encode/decode:
-    from pidgin import Codec
-    codec = Codec()
-    result = await codec.encode("message")
 """
 
-from pidgin._protocol import Protocol
-from pidgin._types import CompressedMessage, DecodedMessage
 from pidgin.ratchet import RatchetCipher
-from pidgin.schema_codec import SchemaCodec
+from pidgin.schema_codec import PidginDecodeError, PidginEncodeError, SchemaCodec
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
-    "Protocol", "Codec", "SchemaCodec", "RatchetCipher",
-    "SecureChannel", "CompressedMessage", "DecodedMessage",
+    "SchemaCodec", "PidginEncodeError", "PidginDecodeError",
+    "RatchetCipher", "SecureChannel",
 ]
 
 
 def __getattr__(name: str):
-    if name == "Codec":
-        from pidgin._codec import Codec
-        return Codec
     if name == "SecureChannel":
         from pidgin.channel import SecureChannel
         return SecureChannel

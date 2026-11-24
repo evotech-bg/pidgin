@@ -50,7 +50,7 @@
  * Version
  * ================================================================ */
 
-static const char *VERSION_STRING = "0.1.0";
+static const char *VERSION_STRING = "0.2.0";
 
 const char *pidgin_version(void) { return VERSION_STRING; }
 
@@ -734,6 +734,7 @@ static int encode_object(pbuf_t *b, cJSON *obj, pfield_t *fields,
         cJSON_Delete(unknown);
         if (!fallback) return -1;
         size_t fb_len = strlen(fallback);
+        if (fb_len > 0xFFFF) { free(fallback); return -1; }  /* length is 16 bits */
         if (pbuf_u16be(b, (uint16_t)fb_len)) { free(fallback); return -1; }
         if (pbuf_write(b, fallback, fb_len)) { free(fallback); return -1; }
         free(fallback);
@@ -745,7 +746,47 @@ static int encode_object(pbuf_t *b, cJSON *obj, pfield_t *fields,
     return 0;
 }
 
+/*
+ * Does this value fit the field schema so that it decodes back unchanged?
+ * A missing required field, a wrong type, an integer outside int range or
+ * a length the wire format cannot hold would otherwise crash the encoder
+ * (NULL value) or decode to different data. The caller then fails the
+ * whole compress call and the server sends plain JSON.
+ */
+static int value_fits(const cJSON *val, const pfield_t *schema) {
+    if (!val) return 0;
+    switch (schema->dtype) {
+    case DTYPE_BOOL:
+        return cJSON_IsBool(val);
+    case DTYPE_INT:
+        return cJSON_IsNumber(val) && val->valuedouble == (double)val->valueint;
+    case DTYPE_FLOAT:
+        return cJSON_IsNumber(val);
+    case DTYPE_STR:
+    case DTYPE_ENUM:
+        return cJSON_IsString(val) && val->valuestring
+            && strlen(val->valuestring) <= 0xFFFF;
+    case DTYPE_TIMESTAMP:
+        return cJSON_IsString(val) && val->valuestring
+            && strlen(val->valuestring) <= 0xFF;
+    case DTYPE_OBJECT:
+        if (!schema->nested) return 1;  /* JSON fallback */
+        return cJSON_IsObject(val);
+    case DTYPE_ARRAY: {
+        if (!schema->items) return 1;  /* JSON fallback */
+        if (!cJSON_IsArray(val) || cJSON_GetArraySize(val) > 0xFFFF) return 0;
+        for (const cJSON *it = val->child; it; it = it->next) {
+            if (!cJSON_IsObject(it)) return 0;
+        }
+        return 1;
+    }
+    default:
+        return 1;  /* written as JSON fallback */
+    }
+}
+
 static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
+    if (!value_fits(val, schema)) return -1;
     switch (schema->dtype) {
     case DTYPE_BOOL:
         return pbuf_u8(b, cJSON_IsTrue(val) ? 1 : 0);
@@ -786,15 +827,15 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
     }
 
     case DTYPE_OBJECT:
-        if (schema->nested && cJSON_IsObject(val)) {
-            return encode_object(b, val, schema->nested,
-                                schema->nested_order, schema->nested_count);
-        } else {
-            return pbuf_u16be(b, 0);
-        }
+        /* Without a nested schema the value goes as JSON, as in Python */
+        if (!schema->nested) goto json_fallback;
+        return encode_object(b, val, schema->nested,
+                            schema->nested_order, schema->nested_count);
 
     case DTYPE_ARRAY:
-        if (schema->items && cJSON_IsArray(val)) {
+        /* Arrays of plain values have no items schema: JSON, as in Python */
+        if (!schema->items) goto json_fallback;
+        if (cJSON_IsArray(val)) {
             int count = cJSON_GetArraySize(val);
             if (pbuf_u16be(b, (uint16_t)count)) return -1;
             for (int i = 0; i < count; i++) {
@@ -808,6 +849,7 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
                     char *s = cJSON_PrintUnformatted(item);
                     if (!s) return -1;
                     size_t slen = strlen(s);
+                    if (slen > 0xFFFF) { free(s); return -1; }
                     if (pbuf_u16be(b, (uint16_t)slen)) { free(s); return -1; }
                     if (pbuf_write(b, s, slen)) { free(s); return -1; }
                     free(s);
@@ -818,11 +860,13 @@ static int encode_value(pbuf_t *b, cJSON *val, pfield_t *schema) {
             return pbuf_u16be(b, 0);
         }
 
-    default: {
+    default:
+    json_fallback: {
         /* JSON fallback */
         char *s = cJSON_PrintUnformatted(val);
         if (!s) return -1;
         size_t slen = strlen(s);
+        if (slen > 0xFFFF) { free(s); return -1; }  /* length is 16 bits */
         if (pbuf_u16be(b, (uint16_t)slen)) { free(s); return -1; }
         if (pbuf_write(b, s, slen)) { free(s); return -1; }
         free(s);
@@ -974,14 +1018,13 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
     }
 
     case DTYPE_OBJECT:
-        if (schema->nested) {
-            return decode_object(r, schema->nested,
-                                schema->nested_order, schema->nested_count);
-        }
-        return cJSON_CreateNull();
+        if (!schema->nested) goto json_fallback;
+        return decode_object(r, schema->nested,
+                            schema->nested_order, schema->nested_count);
 
     case DTYPE_ARRAY:
-        if (schema->items) {
+        if (!schema->items) goto json_fallback;
+        {
             uint16_t count;
             if (rd_u16be(r, &count)) return NULL;
             cJSON *arr = cJSON_CreateArray();
@@ -994,9 +1037,9 @@ static cJSON *decode_value(rdbuf_t *r, pfield_t *schema) {
             }
             return arr;
         }
-        return cJSON_CreateNull();
 
-    default: {
+    default:
+    json_fallback: {
         /* JSON fallback */
         uint16_t slen;
         if (rd_u16be(r, &slen)) return NULL;
@@ -1132,6 +1175,11 @@ pidgin_buf_t pidgin_compress(pidgin_profile_t *profile, const char *json) {
     if (cJSON_IsArray(root)) {
         pbuf_u8(&buf, 0x02);  /* array marker */
         int count = cJSON_GetArraySize(root);
+        if (count > 0xFFFF) {  /* count is written as 16 bits */
+            pbuf_free(&buf);
+            cJSON_Delete(root);
+            return result;
+        }
         pbuf_u16be(&buf, (uint16_t)count);
         for (int i = 0; i < count; i++) {
             cJSON *item = cJSON_GetArrayItem(root, i);
@@ -1674,20 +1722,143 @@ static endpoint_state_t *engine_get_or_create(pidgin_engine_t *engine, const cha
     return ep;
 }
 
-/* Simple ETag: hash of profile JSON */
+/* === Canonical Bytes Hash (Pidgin Fingerprint Format v1) ===
+ *
+ * Both libpidgin (C) and the Python codec must produce identical fingerprints
+ * for the same logical schema profile, so they must hash the same byte
+ * sequence. We define a deterministic binary serialization that does not
+ * depend on JSON-library-specific key ordering choices.
+ *
+ * Format (all integers little-endian, all strings length-prefixed UTF-8):
+ *   profile := [version:u32][field_count:u32][field*]
+ *   field   := [name_len:u16][name][dtype:u8][nullable:u8]
+ *              [enum_count:u16][enum*]
+ *              [has_nested:u8] [nested_count:u32 if has_nested][field* if has_nested]
+ *              [has_items:u8]  [items_count:u32  if has_items] [field* if has_items]
+ *   enum    := [val_len:u16][val]
+ *
+ * dtype encoding: 0=bool 1=int 2=float 3=str 4=enum 5=timestamp 6=object 7=array 8=null
+ *
+ * The hash function is FNV-1a 64-bit (non-cryptographic, deterministic, sufficient
+ * for cache validation). Output is rendered as a 16-character lowercase hex string,
+ * matching the SchemaCodec.fingerprint format on the Python side.
+ */
+
+typedef struct { uint8_t *data; size_t len; size_t cap; } cbuf_t;
+
+static int cbuf_grow(cbuf_t *b, size_t need) {
+    if (b->len + need <= b->cap) return 0;
+    size_t cap = b->cap ? b->cap * 2 : 256;
+    while (cap < b->len + need) cap *= 2;
+    uint8_t *p = (uint8_t *)realloc(b->data, cap);
+    if (!p) return -1;
+    b->data = p; b->cap = cap;
+    return 0;
+}
+static int cbuf_put(cbuf_t *b, const void *src, size_t n) {
+    if (cbuf_grow(b, n)) return -1;
+    memcpy(b->data + b->len, src, n);
+    b->len += n;
+    return 0;
+}
+static int cbuf_u8(cbuf_t *b, uint8_t v)   { return cbuf_put(b, &v, 1); }
+static int cbuf_u16(cbuf_t *b, uint16_t v) { uint8_t le[2]={(uint8_t)v,(uint8_t)(v>>8)}; return cbuf_put(b,le,2); }
+static int cbuf_u32(cbuf_t *b, uint32_t v) {
+    uint8_t le[4]={(uint8_t)v,(uint8_t)(v>>8),(uint8_t)(v>>16),(uint8_t)(v>>24)};
+    return cbuf_put(b, le, 4);
+}
+static int cbuf_str(cbuf_t *b, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > 0xFFFF) return -1;
+    if (cbuf_u16(b, (uint16_t)n)) return -1;
+    if (n > 0 && cbuf_put(b, s, n)) return -1;
+    return 0;
+}
+
+static uint8_t dtype_to_byte(int d) {
+    /* keep in sync with header DTYPE_* values */
+    switch (d) {
+        case DTYPE_BOOL: return 0;
+        case DTYPE_INT:  return 1;
+        case DTYPE_FLOAT:return 2;
+        case DTYPE_STR:  return 3;
+        case DTYPE_ENUM: return 4;
+        case DTYPE_TIMESTAMP: return 5;
+        case DTYPE_OBJECT:return 6;
+        case DTYPE_ARRAY: return 7;
+        case DTYPE_NULL:  return 8;
+        default: return 3; /* str */
+    }
+}
+
+static int encode_canonical_field(cbuf_t *b, const pfield_t *f);
+
+static int encode_canonical_fields(cbuf_t *b, const pfield_t *fields,
+                                    char **order, int count) {
+    if (cbuf_u32(b, (uint32_t)count)) return -1;
+    for (int i = 0; i < count; i++) {
+        const char *name = order ? order[i] : fields[i].name;
+        /* Find the field by name (in case order != natural index) */
+        const pfield_t *f = NULL;
+        for (int j = 0; j < count; j++) {
+            if (strcmp(fields[j].name, name) == 0) { f = &fields[j]; break; }
+        }
+        if (!f) f = &fields[i];
+        if (encode_canonical_field(b, f)) return -1;
+    }
+    return 0;
+}
+
+static int encode_canonical_field(cbuf_t *b, const pfield_t *f) {
+    if (cbuf_str(b, f->name)) return -1;
+    if (cbuf_u8(b, dtype_to_byte(f->dtype))) return -1;
+    if (cbuf_u8(b, f->nullable ? 1 : 0)) return -1;
+
+    int ec = (f->enum_values && f->enum_count > 0) ? f->enum_count : 0;
+    if (ec > 0xFFFF) return -1;
+    if (cbuf_u16(b, (uint16_t)ec)) return -1;
+    for (int i = 0; i < ec; i++)
+        if (cbuf_str(b, f->enum_values[i])) return -1;
+
+    int has_nested = (f->nested && f->nested_count > 0) ? 1 : 0;
+    if (cbuf_u8(b, (uint8_t)has_nested)) return -1;
+    if (has_nested) {
+        if (encode_canonical_fields(b, f->nested, f->nested_order, f->nested_count)) return -1;
+    }
+
+    int has_items = (f->items && f->items_count > 0) ? 1 : 0;
+    if (cbuf_u8(b, (uint8_t)has_items)) return -1;
+    if (has_items) {
+        if (encode_canonical_fields(b, f->items, f->items_order, f->items_count)) return -1;
+    }
+    return 0;
+}
+
+static uint64_t fnv1a_64(const uint8_t *data, size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint64_t)data[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+/* ETag: FNV-1a 64-bit hash of the canonical bytes. Format: "<16-hex>" */
 static char *compute_etag(pidgin_profile_t *profile) {
-    char *json = pidgin_profile_to_json(profile);
-    if (!json) return NULL;
+    if (!profile) return NULL;
 
-    /* Simple DJB2 hash */
-    unsigned long hash = 5381;
-    for (const char *p = json; *p; p++)
-        hash = ((hash << 5) + hash) + (unsigned char)*p;
+    cbuf_t b = {0};
+    if (cbuf_u32(&b, (uint32_t)profile->version)) { free(b.data); return NULL; }
+    if (encode_canonical_fields(&b, profile->fields, profile->field_order,
+                                 profile->field_count)) {
+        free(b.data); return NULL;
+    }
 
-    free(json);
+    uint64_t h = fnv1a_64(b.data, b.len);
+    free(b.data);
 
     char *etag = (char *)malloc(32);
-    if (etag) snprintf(etag, 32, "\"%lx\"", hash);
+    if (etag) snprintf(etag, 32, "\"%016llx\"", (unsigned long long)h);
     return etag;
 }
 

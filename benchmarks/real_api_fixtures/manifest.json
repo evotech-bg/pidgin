@@ -1,0 +1,178 @@
+{
+  "CoinGecko_Top_Coins": {
+    "category": "numeric",
+    "display_name": "CoinGecko Top Coins",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 26,
+    "json_size": 19614,
+    "records": 25,
+    "sha256": "71a39758159cb2153595f4be8a869a7379717ebfc80c6abae1a44e0cc07325c8",
+    "url": "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=25&page=1"
+  },
+  "GitHub_Events": {
+    "category": "field-heavy",
+    "display_name": "GitHub Events",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 7,
+    "json_size": 18684,
+    "records": 30,
+    "sha256": "268b09687f08822af145c9640858b620c52e2215614921cbeea118c77bd3b0b1",
+    "url": "https://api.github.com/events"
+  },
+  "GitHub_Repo_Search": {
+    "category": "field-heavy",
+    "display_name": "GitHub Repo Search",
+    "extraction_key": "items",
+    "fetched_at": "2026-05-08",
+    "fields": 82,
+    "json_size": 162458,
+    "records": 30,
+    "sha256": "1bc774485c7c9e1d66a25bc344576c2dcff8c39e266ebafb0c0609bdf0dab5e9",
+    "url": "https://api.github.com/search/repositories?q=python&per_page=30"
+  },
+  "GitHub_Repos": {
+    "category": "field-heavy",
+    "display_name": "GitHub Repos",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 46,
+    "json_size": 414705,
+    "records": 100,
+    "sha256": "21db273f0eaf437c464252b4ba205fb082f3e54abe68707974fe53f7483eb9d4",
+    "url": "https://api.github.com/repositories?since=1000"
+  },
+  "JSONPlaceholder_Comments": {
+    "category": "shallow",
+    "display_name": "JSONPlaceholder Comments",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 5,
+    "json_size": 139744,
+    "records": 500,
+    "sha256": "061f3ea070d833c1b83a1c05fa81a488e2f3967b36a2beefe8e4cd8ce24febc1",
+    "url": "https://jsonplaceholder.typicode.com/comments"
+  },
+  "JSONPlaceholder_Photos": {
+    "category": "shallow",
+    "display_name": "JSONPlaceholder Photos",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 5,
+    "json_size": 891471,
+    "records": 5000,
+    "sha256": "90d17cc3eb400bd72b0a2f7fc9e61ac511c01b95fa490a806213223d0046e0ff",
+    "url": "https://jsonplaceholder.typicode.com/photos"
+  },
+  "JSONPlaceholder_Posts": {
+    "category": "shallow",
+    "display_name": "JSONPlaceholder Posts",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 4,
+    "json_size": 24519,
+    "records": 100,
+    "sha256": "33ab440a2204b3fa634065a6efc1f0b8c5328a115be02414764721cd9d3add53",
+    "url": "https://jsonplaceholder.typicode.com/posts"
+  },
+  "JSONPlaceholder_Todos": {
+    "category": "shallow",
+    "display_name": "JSONPlaceholder Todos",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 4,
+    "json_size": 18310,
+    "records": 200,
+    "sha256": "c64e198f2e54252218998fd130927c424add53b7887d4e0c4859d8cb22c7d966",
+    "url": "https://jsonplaceholder.typicode.com/todos"
+  },
+  "JSONPlaceholder_Users": {
+    "category": "shallow",
+    "display_name": "JSONPlaceholder Users",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 8,
+    "json_size": 4094,
+    "records": 10,
+    "sha256": "97e70576b132e268a1089f5e0ba822c4c4fbc26eb56e00c34972896aa63487ab",
+    "url": "https://jsonplaceholder.typicode.com/users"
+  },
+  "OpenLibrary_Search": {
+    "category": "text-heavy",
+    "display_name": "OpenLibrary Search",
+    "extraction_key": "docs",
+    "fetched_at": "2026-05-08",
+    "fields": 16,
+    "json_size": 8914,
+    "records": 20,
+    "sha256": "55c7f853b272d4408deac694dee6e810d36ba6632db15e818bc76ca72a5dbc18",
+    "url": "https://openlibrary.org/search.json?q=python&limit=20"
+  },
+  "PokeAPI_Pokemon_List": {
+    "category": "enum-heavy",
+    "display_name": "PokeAPI Pokemon List",
+    "extraction_key": "results",
+    "fetched_at": "2026-05-08",
+    "fields": 2,
+    "json_size": 6531,
+    "records": 100,
+    "sha256": "46656518f91988200a5ecb3323c1cde57714e72c31df5efbf130ddb2bd19b4f9",
+    "url": "https://pokeapi.co/api/v2/pokemon?limit=100"
+  },
+  "PokeAPI_Types": {
+    "category": "enum-heavy",
+    "display_name": "PokeAPI Types",
+    "extraction_key": "results",
+    "fetched_at": "2026-05-08",
+    "fields": 2,
+    "json_size": 1205,
+    "records": 20,
+    "sha256": "b0d59c94a17da9309225d333709564207204aa7ce2287cb2a46eb4b29052e417",
+    "url": "https://pokeapi.co/api/v2/type?limit=20"
+  },
+  "REST_Countries_(subset)": {
+    "category": "field-heavy",
+    "display_name": "REST Countries (subset)",
+    "extraction_key": null,
+    "fetched_at": "2026-05-08",
+    "fields": 8,
+    "json_size": 21198,
+    "records": 53,
+    "sha256": "02ae3f1d7d17b6f7f7130516b46b3bb0cac2f661af3a9626607d30259619ff23",
+    "url": "https://restcountries.com/v3.1/region/europe?fields=name,cca2,region,subregion,population,area,currencies,languages"
+  },
+  "RaM_Characters": {
+    "category": "nested",
+    "display_name": "RaM Characters",
+    "extraction_key": "results",
+    "fetched_at": "2026-05-08",
+    "fields": 12,
+    "json_size": 19382,
+    "records": 20,
+    "sha256": "bc5728e11beaa50326e1d86e633c9ad511f2e0d9facfc507bcce3f0d4733f6f0",
+    "url": "https://rickandmortyapi.com/api/character"
+  },
+  "RaM_Episodes": {
+    "category": "nested",
+    "display_name": "RaM Episodes",
+    "extraction_key": "results",
+    "fetched_at": "2026-05-08",
+    "fields": 7,
+    "json_size": 28033,
+    "records": 20,
+    "sha256": "767c68a70f0db63b19cc288c8e5b6fcaea26b4fb5ed2a44ba75c4003b534aae8",
+    "url": "https://rickandmortyapi.com/api/episode"
+  },
+  "RaM_Locations": {
+    "category": "nested",
+    "display_name": "RaM Locations",
+    "extraction_key": "results",
+    "fetched_at": "2026-05-08",
+    "fields": 7,
+    "json_size": 27142,
+    "records": 20,
+    "sha256": "a10b691c358385de99ad42e8c7d628322fb2b1c09746a625fd9fd8554bf640a9",
+    "url": "https://rickandmortyapi.com/api/location"
+  }
+}

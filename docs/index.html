@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pidgin -- Runtime-learned compression that beats Protobuf</title>
+<title>Pidgin: runtime-learned binary encoding for JSON APIs</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -125,10 +125,10 @@ footer a{color:var(--cyan)}
 <!-- Hero -->
 <section class="hero">
   <div class="container">
-    <h1><span>Pidgin</span> -- Runtime-learned compression that beats Protobuf</h1>
-    <p class="tagline">Learns schemas at runtime from sample JSON, strips keys entirely, encodes values optimally. No .proto files, no codegen, zero config.</p>
+    <h1><span>Pidgin</span>: runtime-learned binary encoding for JSON APIs</h1>
+    <p class="tagline">Learns the schema of your JSON responses, drops the keys and writes the values in a compact binary form. No .proto files, no code generation. Early: the Python library, the FastAPI and Django middleware and the JavaScript decoder work; most web server modules do not yet.</p>
     <div class="install">pip install pidgin-codec</div>
-    <div class="sub">Python 3.10+ / MIT License / C extension auto-detected</div>
+    <div class="sub">Python 3.10+ / MIT License / builds a small C extension on install</div>
   </div>
 </section>
 
@@ -136,7 +136,7 @@ footer a{color:var(--cyan)}
 <section class="bench-section" id="benchmarks">
   <div class="container">
     <h2>Benchmarks</h2>
-    <p class="subtitle">Compression ratio: % of original JSON size (lower is better). Verified on identical data, single-threaded.</p>
+    <p class="subtitle">Generated API data, % of original JSON size (lower is better). Measured 24 Nov 2026 with <code>python benchmarks/realistic_api.py</code>, single thread, Apple M5 Max.</p>
 
     <div class="bench-grid">
       <div class="bench-block">
@@ -202,18 +202,18 @@ footer a{color:var(--cyan)}
       </div>
     </div>
 
-    <h3 style="font-size:0.9rem;color:var(--gray);margin:32px 0 16px;font-weight:500">Speed (ms, with C extension -- lower is better)</h3>
+    <h3 style="font-size:0.9rem;color:var(--gray);margin:32px 0 16px;font-weight:500">Time to compress (ms, C extension, default output check; lower is better)</h3>
     <table>
       <thead>
         <tr><th>Dataset</th><th>brotli</th><th>zstd</th><th>Proto+zstd</th><th>Pidgin</th></tr>
       </thead>
       <tbody>
-        <tr><td>Users x1000</td><td>7.78</td><td>3.67</td><td>5.76</td><td class="best">6.41</td></tr>
-        <tr><td>Orders x500</td><td>10.52</td><td>6.41</td><td>6.97</td><td class="best">7.96</td></tr>
-        <tr><td>Events x5000</td><td>30.49</td><td>14.85</td><td>24.92</td><td class="best">25.62</td></tr>
+        <tr><td>Users x1000</td><td>11.1</td><td>7.0</td><td>8.2</td><td>30.7</td></tr>
+        <tr><td>Orders x500</td><td>10.8</td><td>5.8</td><td>8.0</td><td>34.3</td></tr>
+        <tr><td>Events x5000</td><td>35.8</td><td>19.9</td><td>21.1</td><td>86.8</td></tr>
       </tbody>
     </table>
-    <p style="font-size:0.75rem;color:var(--gray)">Best compression across all datasets. Speed competitive with Proto+zstd, faster than brotli on all except Users.</p>
+    <p style="font-size:0.75rem;color:var(--gray)">Smallest output on this generated data, and 2.5 to 3 times slower to compress than brotli. On 16 real public API responses (<code>python benchmarks/extended_real_api.py</code>) Pidgin is about even with brotli: smaller on 5, equal on 3, larger on 8, median 18.3% against 18.0%. It helps most on responses with many fields and nested objects.</p>
   </div>
 </section>
 
@@ -227,12 +227,12 @@ footer a{color:var(--cyan)}
       <div class="card">
         <span class="tag core">core</span>
         <h3>SchemaCodec</h3>
-        <p>Runtime-learned binary compression. Feed it sample JSON, it infers the schema -- field names, types, enum domains, nesting. Then it strips keys entirely and encodes values with type-optimal encoders. C extension for native speed.</p>
+        <p>Runtime-learned binary encoding. Give it sample JSON and it infers the schema: field names, types, enum values, nesting. It then drops the keys and writes each value with an encoder for its type. Every payload is checked to decode back to the same data; data that does not fit the profile is refused, so it can be sent as JSON.</p>
       </div>
       <div class="card">
         <span class="tag sec">optional</span>
         <h3>RatchetCipher</h3>
-        <p>Forward-secrecy encryption for persistent channels (WebSocket, SSE, IoT). Keys ratchet after every message -- compromising a future key cannot decrypt past messages. Install with <code>pip install pidgin[crypto]</code>.</p>
+        <p>Forward-secrecy encryption for persistent channels (WebSocket, SSE, IoT). The key moves forward after every message, so a key taken later cannot decrypt earlier messages. Install with <code>pip install "pidgin-codec[crypto]"</code>.</p>
       </div>
     </div>
 
@@ -244,23 +244,23 @@ footer a{color:var(--cyan)}
 <span class="cmt"># Learn schema from sample records</span>
 <span class="var">codec</span> = <span class="fn">SchemaCodec</span>.<span class="fn">learn</span>(<span class="var">sample_records</span>)
 
-<span class="cmt"># Compress: ~10-19% of original JSON</span>
+<span class="cmt"># Compress: 10-19% of the JSON on generated data, about brotli on real APIs</span>
 <span class="var">compressed</span> = <span class="var">codec</span>.<span class="fn">compress</span>(<span class="var">records</span>)
 
-<span class="cmt"># Decompress: lossless round-trip</span>
+<span class="cmt"># Decompress: the same data back</span>
 <span class="var">original</span> = <span class="var">codec</span>.<span class="fn">decompress</span>(<span class="var">compressed</span>)</code></pre>
 
       <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:16px;font-weight:500">Schema Evolution</h3>
 <pre><code><span class="cmt"># v1 schema</span>
 <span class="var">codec_v1</span> = <span class="fn">SchemaCodec</span>.<span class="fn">learn</span>(<span class="var">users_v1</span>)
 
-<span class="cmt"># Data gains new fields, types change</span>
+<span class="cmt"># Data gains new fields</span>
 <span class="var">profile_v2</span> = <span class="var">codec_v1</span>.<span class="var">profile</span>.<span class="fn">evolve</span>(<span class="var">users_v2</span>)
 <span class="var">codec_v2</span> = <span class="fn">SchemaCodec</span>(<span class="var">profile_v2</span>)
 
-<span class="cmt"># v2 handles both old and new data shapes</span>
+<span class="cmt"># v2 encodes and decodes both old and new data shapes</span>
 <span class="var">codec_v2</span>.<span class="fn">compress</span>(<span class="var">old_data</span>)  <span class="cmt"># missing new fields → absent marker</span>
-<span class="var">codec_v2</span>.<span class="fn">compress</span>(<span class="var">new_data</span>)  <span class="cmt"># new fields encoded, removed fields skipped</span></code></pre>
+<span class="var">codec_v2</span>.<span class="fn">compress</span>(<span class="var">new_data</span>)  <span class="cmt"># new fields encoded as typed values</span></code></pre>
     </div>
   </div>
 </section>
@@ -269,7 +269,7 @@ footer a{color:var(--cyan)}
 <section id="how-it-works" style="background:var(--bg2);border-top:1px solid var(--cyan-dim);border-bottom:1px solid var(--cyan-dim)">
   <div class="container">
     <h2>How It Works</h2>
-    <p class="subtitle">Two-stage pipeline. Each stage is independent and composable.</p>
+    <p class="subtitle">Two stages. Each can be used on its own.</p>
 
     <div class="pipeline">
       <div class="pipe-step">
@@ -294,8 +294,8 @@ footer a{color:var(--cyan)}
     </div>
 
     <div style="margin-top:40px">
-      <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:12px;font-weight:500">Key insight: why Pidgin beats generic compressors</h3>
-      <p style="font-size:0.8rem;color:var(--gray);line-height:1.8">Generic compressors (gzip, brotli, zstd) treat data as opaque byte streams. They find repeated byte patterns but cannot exploit structural knowledge. In a JSON array of 1000 objects, the key <code>"email"</code> appears 1000 times -- generic compressors reduce this to a few bytes via backreferences, but Pidgin eliminates it entirely. It knows the schema, so the key is encoded once in the profile header, and each record contains only values in a fixed order. Combined with type-specific encoding (varints for integers, enum indices for categorical strings, nested sub-profiles for objects), this produces consistently smaller output.</p>
+      <h3 style="font-size:0.9rem;color:var(--gray);margin-bottom:12px;font-weight:500">Where Pidgin helps and where it does not</h3>
+      <p style="font-size:0.8rem;color:var(--gray);line-height:1.8">Generic compressors (gzip, brotli, zstd) treat data as opaque byte streams. They find repeated byte patterns but cannot exploit structural knowledge. In a JSON array of 1000 objects, the key <code>"email"</code> appears 1000 times. Generic compressors reduce this to a few bytes with backreferences; Pidgin leaves it out, because the key is in the profile and each record holds only values in a fixed order. With type-specific encoding (varints for integers, enum indices for repeated strings, sub-profiles for nested objects) this gives smaller output on responses with many fields. On text-heavy responses or ones with few fields brotli is as good or better.</p>
     </div>
   </div>
 </section>
@@ -304,7 +304,7 @@ footer a{color:var(--cyan)}
 <section id="api">
   <div class="container">
     <h2>API Reference</h2>
-    <p class="subtitle">Complete public interface. All classes importable from <code>pidgin</code>.</p>
+    <p class="subtitle">Public interface. All classes import from <code>pidgin</code>.</p>
 
     <table>
       <thead>
@@ -312,16 +312,16 @@ footer a{color:var(--cyan)}
       </thead>
       <tbody>
         <tr><td><code>SchemaCodec.learn(samples)</code></td><td>Learn schema from list of dicts, return codec</td></tr>
-        <tr><td><code>codec.compress(data)</code></td><td>Compress dict or list[dict] to binary bytes</td></tr>
+        <tr><td><code>codec.compress(data, verify=True)</code></td><td>Compress dict or list[dict] to bytes; raises <code>PidginEncodeError</code> if the data does not fit the profile</td></tr>
         <tr><td><code>codec.decompress(data)</code></td><td>Decompress binary back to dict or list[dict]</td></tr>
         <tr><td><code>codec.profile</code></td><td>Access learned SchemaProfile</td></tr>
-        <tr><td><code>profile.evolve(new_samples)</code></td><td>Evolve schema -- backward + forward compatible</td></tr>
+        <tr><td><code>profile.evolve(new_samples)</code></td><td>Evolve the schema; the new profile reads old and new data shapes</td></tr>
         <tr><td><code>profile.diff(other)</code></td><td>Show changes between profile versions</td></tr>
         <tr><td><code>profile.to_json() / from_json()</code></td><td>Serialize / deserialize profile for sharing</td></tr>
         <tr><td><code>RatchetCipher(shared_secret)</code></td><td>Init encryption with shared secret</td></tr>
-        <tr><td><code>cipher.encrypt(data)</code></td><td>Encrypt bytes + ratchet key forward</td></tr>
-        <tr><td><code>cipher.decrypt(data)</code></td><td>Decrypt bytes + ratchet key forward</td></tr>
-        <tr><td><code>SecureChannel.create(name)</code></td><td>E2E encrypted channel (X25519 + SchemaCodec + Ratchet)</td></tr>
+        <tr><td><code>cipher.encrypt(data)</code></td><td>Encrypt bytes and move the key forward</td></tr>
+        <tr><td><code>cipher.decrypt(data)</code></td><td>Decrypt bytes and move the key forward</td></tr>
+        <tr><td><code>SecureChannel.create(name)</code></td><td>Encrypted channel: X25519 key exchange, SchemaCodec and RatchetCipher</td></tr>
       </tbody>
     </table>
   </div>
@@ -331,25 +331,27 @@ footer a{color:var(--cyan)}
 <section id="servers" style="background:var(--bg2);border-top:1px solid var(--cyan-dim);border-bottom:1px solid var(--cyan-dim)">
   <div class="container">
     <h2>Server Integration</h2>
-    <p class="subtitle">One line to enable. Zero backend changes.</p>
+    <p class="subtitle">What works today, checked by running each one for release 0.2.0.</p>
 
     <table>
       <thead>
-        <tr><th>Server</th><th>Config</th><th>Integration</th></tr>
+        <tr><th>Integration</th><th>Config</th><th>State</th></tr>
       </thead>
       <tbody>
-        <tr><td>Kong</td><td><code>pidgin = true</code></td><td>Lua FFI plugin</td></tr>
-        <tr><td>nginx</td><td><code>pidgin on;</code></td><td>Dynamic C module</td></tr>
-        <tr><td>Apache</td><td><code>PidginEnable On</code></td><td>Output filter</td></tr>
-        <tr><td>Caddy</td><td><code>pidgin</code></td><td>Go cgo middleware</td></tr>
-        <tr><td>Traefik</td><td>middleware config</td><td>Pure Go plugin</td></tr>
-        <tr><td>HAProxy</td><td>SPOE filter</td><td>External agent</td></tr>
-        <tr><td>FastAPI</td><td><code>add_middleware(PidginMiddleware)</code></td><td>Python</td></tr>
-        <tr><td>Django</td><td><code>MIDDLEWARE = [...]</code></td><td>Python</td></tr>
+        <tr><td>FastAPI</td><td><code>add_middleware(PidginMiddleware)</code></td><td><span style="color:var(--green)">Works, tested</span>: real server, responses decode to the same JSON</td></tr>
+        <tr><td>Django</td><td><code>MIDDLEWARE = [...]</code></td><td><span style="color:var(--green)">Works, tested</span>: real server, same check</td></tr>
+        <tr><td>JS decoder</td><td><code>PidginDecoder</code></td><td><span style="color:var(--green)">Works, tested</span>: decodes Python and libpidgin output</td></tr>
+        <tr><td>Kong</td><td>Lua FFI plugin</td><td><span style="color:var(--orange)">Experimental</span>: unit tested, not run inside Kong for this release</td></tr>
+        <tr><td>JS fetch client</td><td><code>PidginClient</code></td><td><span style="color:var(--red)">Not working yet</span>: asks in a way servers do not read, gets plain JSON</td></tr>
+        <tr><td>nginx</td><td>dynamic C module</td><td><span style="color:var(--red)">Not working yet</span>: learns, never compresses</td></tr>
+        <tr><td>Apache</td><td>output filter</td><td><span style="color:var(--red)">Not working yet</span>: builds, never run</td></tr>
+        <tr><td>Caddy</td><td>Go middleware</td><td><span style="color:var(--red)">Not working yet</span>: build cannot find the module</td></tr>
+        <tr><td>Traefik</td><td>Go plugin</td><td><span style="color:var(--red)">Not working yet</span>: builds, Traefik cannot load it</td></tr>
+        <tr><td>HAProxy</td><td>SPOE agent</td><td><span style="color:var(--red)">Not working yet</span>: config uses an action HAProxy does not have</td></tr>
       </tbody>
     </table>
 
-    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">All modules use <code>libpidgin</code> (portable C library). Auto-learns schemas, auto-compresses, auto-evolves on API changes. Profiles served at <code>/.well-known/pidgin/</code>.</p>
+    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">The server modules are built on <code>libpidgin</code>, a C library. The middleware learns from the first 30 records per endpoint, encodes for clients that send <code>Accept-Encoding: pidgin</code> and serves profiles at <code>/.well-known/pidgin/</code>. Pagination wrappers such as <code>{"data": [...]}</code> are sent as plain JSON.</p>
   </div>
 </section>
 
@@ -357,23 +359,22 @@ footer a{color:var(--cyan)}
 <section id="evolution">
   <div class="container">
     <h2>Schema Evolution</h2>
-    <p class="subtitle">API changes handled automatically. Zero downtime.</p>
+    <p class="subtitle">What happens when the API changes.</p>
 
     <table>
       <thead>
         <tr><th>API Change</th><th>What Happens</th></tr>
       </thead>
       <tbody>
-        <tr><td>New field added</td><td>JSON fallback, then auto-evolve incorporates it as typed field</td></tr>
-        <tr><td>Field removed</td><td>ABSENT marker (1 byte), old clients unaffected</td></tr>
-        <tr><td>Field returns</td><td>Already in schema as nullable, encodes typed immediately</td></tr>
-        <tr><td>New enum value</td><td>Appended to list (old indices preserved)</td></tr>
-        <tr><td>Type widened (int to float)</td><td>Auto-widened safely</td></tr>
-        <tr><td>Schema drift detected</td><td>Auto-evolve, profile version bumped, new ETag</td></tr>
+        <tr><td>New field added</td><td>Written as JSON inside the payload until the profile evolves, then typed</td></tr>
+        <tr><td>Field becomes optional</td><td>The evolved profile marks it nullable; absent costs one byte. Before that, records without it are sent as JSON</td></tr>
+        <tr><td>New enum value</td><td>Appended; old indices keep their meaning</td></tr>
+        <tr><td>Int becomes float</td><td>Widened</td></tr>
+        <tr><td>Schema drift in the middleware</td><td>Every 500 requests the keys are compared; if they changed, the profile evolves and gets a new version and ETag</td></tr>
       </tbody>
     </table>
 
-    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">Old clients with v1 profiles decode v2 data (unknown fields in JSON fallback). New clients with v2 profiles decode v1 data (missing fields as absent). Bidirectional compatibility guaranteed.</p>
+    <p style="font-size:0.8rem;color:var(--gray);margin-top:16px">A payload decodes only with the profile version it was encoded with. Clients should fetch the profile again when the <code>X-Pidgin-ETag</code> header changes.</p>
   </div>
 </section>
 

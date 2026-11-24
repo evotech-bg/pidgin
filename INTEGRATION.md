@@ -1,10 +1,12 @@
 # Pidgin Integration Guide
 
+This guide shows how to wire `SchemaCodec` into an app by hand. For the ready FastAPI and Django middleware, and for which integrations work today, see the [README](README.md#what-works-today).
+
 ## Install
 
 ```bash
-pip install pidgin                  # core (brotli included)
-pip install pidgin[crypto]          # + RatchetCipher / SecureChannel
+pip install pidgin-codec               # core (brotli included)
+pip install "pidgin-codec[crypto]"     # adds RatchetCipher and SecureChannel
 ```
 
 ---
@@ -12,7 +14,7 @@ pip install pidgin[crypto]          # + RatchetCipher / SecureChannel
 ## 1. Schema-Aware API Compression (SchemaCodec)
 
 Compresses JSON API responses by learning the schema once, then encoding only values.
-Beats brotli and Protobuf on both compression ratio and speed. Fully lossless.
+On generated API data the output is a little smaller than brotli and Protobuf+zstd; on real public APIs it is about even with brotli. It is slower to compress than brotli. `compress()` checks that the payload decodes to the same data and raises `PidginEncodeError` if it would not.
 
 ### How it works
 
@@ -160,16 +162,14 @@ npm install @pidgin/codec
 ```
 
 ```typescript
-import { PidginClient } from '@pidgin/codec';
+import { PidginDecoder } from "@pidgin/codec";
+import { brotliDecompressSync } from "node:zlib";
 
-const client = new PidginClient({
-  baseUrl: 'https://api.example.com',
-  profiles: { users: usersProfileJson },
-});
-
-// Auto-negotiates: sends Accept-Encoding: pidgin, decodes response
-const users = await client.get('/api/users', 'users');
+const decoder = PidginDecoder.fromJSON(usersProfileJson, (b) => new Uint8Array(brotliDecompressSync(b)));
+const users = await decoder.decode(responseBytes);
 ```
+
+`PidginClient` in the same package does not work yet: it asks with `Accept: application/x-pidgin`, which servers do not read, so it always gets plain JSON.
 
 ---
 
@@ -183,7 +183,7 @@ from pidgin import SchemaCodec
 # v1 schema
 codec_v1 = SchemaCodec.learn(users_v1_samples)
 
-# API evolves — new fields, removed fields, new enum values
+# API evolves: new fields, removed fields, new enum values
 v2_profile = codec_v1.profile.evolve(users_v2_samples)
 codec_v2 = SchemaCodec(v2_profile)
 
@@ -202,12 +202,12 @@ for line in codec_v1.profile.diff(v2_profile):
 
 | Scenario | Use | Why |
 |---|---|---|
-| REST API responses | `SchemaCodec` | 81-89% savings, lossless, faster than brotli |
+| REST API responses with many fields | `SchemaCodec` | smaller than brotli on field-heavy and nested data; about even on the rest |
 | Mobile API | `SchemaCodec` | Smaller payloads = faster loads on slow networks |
 | WebSocket streams | `SchemaCodec + RatchetCipher` | Per-event savings + forward-secrecy encryption |
-| Database sync / ETL | `SchemaCodec` | Massive savings on repetitive structured data |
+| Database sync / ETL | `SchemaCodec` | Repetitive structured records |
 | IoT / edge | `SchemaCodec + RatchetCipher` | Compact + encrypted on constrained links |
-| Already using Protobuf | Consider switching | Pidgin compresses 1-5% better, no codegen needed |
+| Already using Protobuf | Probably stay | Pidgin was 1.3 to 1.5 points smaller than Protobuf+zstd on generated data and is slower; switching pays only if you want to drop codegen |
 | Free-form text / files | Not suitable | No repeating schema to exploit |
 
 ---

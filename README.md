@@ -3,228 +3,195 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
 
-**Runtime-learned compression that beats Protobuf.** No `.proto` files, no codegen, zero config. One line to enable in your web server.
+**Runtime-learned binary encoding for JSON APIs.** Pidgin watches your JSON responses, learns their schema, drops the keys and writes the values in a compact binary form. No `.proto` files and no code generation.
+
+Status: early. The Python library, the FastAPI and Django middleware and the JavaScript decoder work and are tested. Most web server modules do not work yet. See [What works today](#what-works-today).
 
 ---
 
-## How It Works
+## How it works
 
-1. Pidgin observes your JSON API responses and learns the schema automatically
-2. It strips all keys (both sides know the schema) and encodes values with type-optimal binary
-3. Brotli compression on top for maximum density
-4. Clients negotiate via `Accept-Encoding: pidgin`
+1. Pidgin observes JSON responses and learns the schema (field names, types, enum values, nesting).
+2. Keys are dropped (both sides hold the schema) and values are written with type-specific binary encoders.
+3. Brotli runs on top when it makes the payload smaller.
+4. A client asks for it with `Accept-Encoding: pidgin` and decodes with the schema profile the server publishes at `/.well-known/pidgin/<endpoint>`.
 
-**Result:** 10-19% of original JSON size. Smaller than gzip, brotli, and Protobuf+zstd.
+On generated API data the result is 10.8% to 18.9% of the original JSON, a little smaller than brotli and Protobuf+zstd. On real public API responses it is about the same as brotli. Pidgin is slower to compress than brotli. Numbers and commands are in [Benchmarks](#benchmarks).
 
-## Quick Start
+## What works today
 
-### Web Server (one line)
+Checked for release 0.2.0 by running each piece, not by reading the code. The logs of that check are summarised in [CHANGELOG.md](CHANGELOG.md).
 
-```nginx
-# nginx
-pidgin on;
-```
+| Integration | State | What was checked |
+|---|---|---|
+| Python library (`SchemaCodec`) | Works, tested | unit tests, C extension and pure Python encoders |
+| `RatchetCipher`, `SecureChannel` | Works, tested | unit tests (needs the `crypto` extra) |
+| FastAPI middleware | Works, tested | real uvicorn server, `Accept-Encoding: pidgin`, body decodes to the same JSON |
+| Django middleware | Works, tested | real Django server, same check |
+| JavaScript decoder (`PidginDecoder`) | Works, tested | decodes Python and libpidgin output to the same data |
+| C library (`libpidgin`) | Works, tested | C tests, output decoded by Python and JavaScript |
+| Kong plugin | Experimental | header parsing unit test passes and the engine it wraps is tested; the plugin was not run inside Kong for this release |
+| JavaScript `PidginClient` | Not working yet | sends `Accept: application/x-pidgin`, which no Pidgin server reads, so it always gets plain JSON. Browsers do not let scripts set `Accept-Encoding` |
+| nginx module | Not working yet | loads and learns, but never compresses a response |
+| Apache module | Not working yet | builds, never run against Apache |
+| Caddy module | Not working yet | the Caddy build cannot find the module |
+| Traefik plugin | Not working yet | Go code builds, Traefik cannot load the plugin |
+| HAProxy agent | Not working yet | agent builds, the HAProxy config uses an action HAProxy does not have |
 
-```lua
--- Kong plugin
-plugins = { { name = "pidgin" } }
-```
+Known limits of the working parts:
 
-```python
-# FastAPI
-from pidgin.contrib.fastapi import PidginMiddleware
-app.add_middleware(PidginMiddleware)
-```
+- `compress()` checks its own output. Data that does not fit the learned profile (a required field missing, an integer wider than 64 bits, a list where a string was learned) raises `PidginEncodeError` instead of producing a payload that decodes to something else. The middleware then sends plain JSON. `compress(data, verify=False)` skips the check.
+- Responses wrapped for pagination, such as `{"data": [...], "total": 10}`, are sent as plain JSON. Only a record or a list of records is encoded. A record that has a list field named `data`, `results`, `items` or `records` is taken for such a wrapper and is also sent as JSON.
+- A payload decodes only with the profile it was encoded with. When the server's profile changes (it evolves after schema drift), clients must fetch the new one. The middleware sends the current profile ETag in `X-Pidgin-ETag`.
+- Decoded objects come back with keys in schema order, not in the order the server wrote them. Values are identical.
 
-```python
-# Django
-MIDDLEWARE = ["pidgin.contrib.django.PidginMiddleware"]
-```
+## Quick start
 
-Zero changes to your backend code. Pidgin auto-learns, auto-compresses, auto-evolves.
-
-### Python Library
+### Python library
 
 ```bash
 pip install pidgin-codec
 ```
 
+The PyPI package is a source distribution, so installing it builds a small C extension (a C compiler is needed).
+
 ```python
 from pidgin import SchemaCodec
 
-codec = SchemaCodec.learn(sample_records)      # learn from 20-50 samples
-compressed = codec.compress(records)            # 10-19% of JSON size
-original = codec.decompress(compressed)         # lossless roundtrip
+codec = SchemaCodec.learn(sample_records)      # learn from 20-50 records
+compressed = codec.compress(records)            # dict or list[dict] -> bytes
+original = codec.decompress(compressed)         # same data back
+profile_json = codec.profile.to_json()          # give this to clients
 ```
 
-### JavaScript Client
+### FastAPI
+
+```python
+from fastapi import FastAPI
+from pidgin.contrib.fastapi import PidginMiddleware
+
+app = FastAPI()
+app.add_middleware(PidginMiddleware)
+```
+
+### Django
+
+```python
+# settings.py
+MIDDLEWARE = [
+    "pidgin.contrib.django.PidginMiddleware",
+    # ...
+]
+```
+
+The middleware learns from the first 30 records it sees per endpoint, then encodes responses for clients that send `Accept-Encoding: pidgin`. Other clients keep getting JSON. Profiles are served at `/.well-known/pidgin/<endpoint>`, for example `/.well-known/pidgin/api-users` for `/api/users`.
+
+### JavaScript decoder
 
 ```bash
 npm install @pidgin/codec
 ```
 
 ```typescript
-import { PidginClient } from '@pidgin/codec';
+import { PidginDecoder } from "@pidgin/codec";
+import { brotliDecompressSync } from "node:zlib";
 
-const client = new PidginClient({
-  baseUrl: 'https://api.example.com',
-  profiles: { users: profileJson },
-});
-const users = await client.get('/api/users', 'users');
+// profile: JSON text from /.well-known/pidgin/<endpoint>
+// body: the response bytes (Content-Encoding: pidgin)
+const decoder = PidginDecoder.fromJSON(profile, (b) => new Uint8Array(brotliDecompressSync(b)));
+const data = await decoder.decode(body);
 ```
+
+Pass a brotli function. Without one the decoder falls back to `DecompressionStream("br")`, which Node 22 does not have; brotli payloads then fail with a clear error.
 
 ## Benchmarks
 
-All benchmarks: same machine, same data, single-threaded. Lower is better.
+Measured on 24 November 2026: Apple M5 Max laptop, Python 3.15, C extension on, single thread. Lower is better.
 
-### Compression Ratio (% of original JSON)
+### Generated API data
 
-| Dataset | gzip | brotli | Protobuf+zstd | **Pidgin** |
+`python benchmarks/realistic_api.py`
+
+| Dataset | gzip -6 | brotli -6 | Protobuf+zstd | Pidgin |
 |---|---|---|---|---|
-| Users x1000 | 21.4% | 19.5% | 20.3% | **18.9%** |
-| Orders x500 (nested) | 19.1% | 17.5% | 17.4% | **16.1%** |
-| Events x5000 | 13.6% | 12.3% | 12.3% | **10.8%** |
+| Users x1000 | 21.4% | 19.5% | 20.3% | 18.9% |
+| Orders x500 (nested) | 19.1% | 17.5% | 17.4% | 16.1% |
+| Events x5000 | 13.6% | 12.3% | 12.3% | 10.8% |
 
-### Speed (ms, C extension)
+Time to compress, in ms, with the default output check:
 
-| Dataset | brotli | zstd | Proto+zstd | **Pidgin** |
+| Dataset | brotli -6 | zstd -6 | Protobuf+zstd | Pidgin |
 |---|---|---|---|---|
-| Users x1000 | 7.78 | 3.67 | 5.76 | **6.41** |
-| Orders x500 | 10.52 | 6.41 | 6.97 | **7.96** |
-| Events x5000 | 30.49 | 14.85 | 24.92 | **25.62** |
+| Users x1000 | 11.1 | 7.0 | 8.2 | 30.7 |
+| Orders x500 | 10.8 | 5.8 | 8.0 | 34.3 |
+| Events x5000 | 35.8 | 19.9 | 21.1 | 86.8 |
 
-Speed competitive with brotli, faster at scale.
+Pidgin is smaller on this data and 2.5 to 3 times slower to compress than brotli. Without the output check (`verify=False`) the same run measured 16.7, 20.7 and 63.3 ms. Times vary between runs on a laptop; sizes do not.
 
-### Real Public APIs (verified, all roundtrips lossless)
+### Real public API responses
 
-| API | Fields | brotli | Pidgin | Winner |
-|---|---|---|---|---|
-| GitHub Repos | 46 | 6.7% | **6.0%** | Pidgin |
-| GitHub Search | 82 | 8.8% | **8.4%** | Pidgin |
-| JSONPlaceholder Posts | 4 | 27.5% | 27.5% | Tie |
-| JSONPlaceholder Comments | 5 | **27.5%** | 28.4% | brotli |
-| JSONPlaceholder Todos | 4 | 20.5% | **20.2%** | Pidgin |
-| JSONPlaceholder Photos | 5 | **13.5%** | 14.3% | brotli |
+`python benchmarks/extended_real_api.py` (16 cached responses in `benchmarks/real_api_fixtures`, checksums verified)
 
-Pidgin wins on field-heavy APIs (many keys to eliminate). brotli wins on text/URL-heavy data with few fields. Both produce lossless roundtrips.
+| API | Fields | brotli | Pidgin |
+|---|---|---|---|
+| GitHub Repos | 46 | 6.7% | 6.0% |
+| GitHub Repo Search | 82 | 8.8% | 8.4% |
+| Rick and Morty Characters | 12 | 6.0% | 4.6% |
+| JSONPlaceholder Posts | 4 | 27.5% | 27.5% |
+| JSONPlaceholder Comments | 5 | 27.5% | 28.4% |
+| JSONPlaceholder Photos | 5 | 13.5% | 14.3% |
+| CoinGecko Top Coins | 26 | 22.9% | 23.9% |
 
-## Schema Evolution
+Across all 16: Pidgin is smaller on 5, equal on 3 and larger on 8. Median 18.3% for Pidgin, 18.0% for brotli. Pidgin helps most on responses with many fields and nested objects, and does not help on text-heavy or few-field data. Every response decoded back to the same data.
 
-API structure changes are handled automatically:
-
-| Change | What happens |
-|--------|-------------|
-| **New field added** | Falls to JSON fallback, then auto-evolve incorporates it |
-| **Field removed** | ABSENT marker (1 byte), old clients unaffected |
-| **Field returns** | Already in schema as nullable, encodes typed immediately |
-| **New enum value** | Appended to enum list (old indices preserved) |
-| **Type widened** (int to float) | Auto-widened safely |
-| **Schema drift detected** | Auto-evolve every 500 requests, profile version bumped |
+## Schema evolution
 
 ```python
-# Manual evolution
 v2_profile = codec.profile.evolve(new_samples)
 v2_codec = SchemaCodec(v2_profile)
 
-# See what changed
 for line in codec.profile.diff(v2_profile):
     print(line)
 ```
 
-Old clients with v1 profiles can still decode v2 data (unknown fields in JSON fallback).
-New clients with v2 profiles can decode v1 data (missing fields as absent).
+| Change | What happens |
+|--------|-------------|
+| New field added | Written as JSON inside the payload until the profile evolves, then typed |
+| Field becomes optional | Evolved profile marks it nullable; absent costs one byte |
+| New enum value | Appended, old indices keep their meaning |
+| Int becomes float | Widened |
+| Schema drift in the middleware | Every 500 requests the keys are compared; if they changed the profile evolves and its version and ETag change |
 
-## Why Not Just Use X?
+An evolved codec reads both old and new shapes of the data. A payload encoded with one profile version cannot be decoded with another version, so clients must refresh the profile when the ETag changes.
 
-| Approach | Limitation Pidgin solves |
-|---|---|
-| **gzip/brotli** | Treats data as opaque bytes. Cannot exploit key repetition or type knowledge. |
-| **Protobuf** | Requires `.proto` files, codegen, schema management. Pidgin learns at runtime. |
-| **Protobuf+zstd** | Closes compression gap but adds toolchain complexity. Pidgin beats it with zero setup. |
-| **msgpack/CBOR** | Binary JSON that still encodes every key. Pidgin eliminates keys entirely. |
-| **Avro** | Needs schema registry infrastructure. Pidgin schemas are self-contained. |
+## Optional: encryption
 
-## Architecture
-
+```bash
+pip install "pidgin-codec[crypto]"
 ```
-Client                     Web Server                    Backend
-  |                            |                            |
-  |  Accept-Encoding: pidgin   |                            |
-  | -------------------------> |  proxy_pass                |
-  |                            | -------------------------> |
-  |                            | <-------- JSON response -- |
-  |                            |                            |
-  |                            |  Pidgin engine:            |
-  |                            |    if learning: observe    |
-  |                            |    if ready: compress      |
-  |                            |    if drift: evolve        |
-  |                            |                            |
-  | <-- Content-Encoding: pidgin                            |
-  |     (binary, 10-19% of JSON)                            |
-```
-
-Backend returns normal JSON. Pidgin compresses transparently at the server level.
-
-## Server Modules
-
-| Server | Integration | Config |
-|--------|------------|--------|
-| **Kong** | Lua FFI plugin | `pidgin = true` |
-| **nginx** | Dynamic C module | `pidgin on;` |
-| **Apache** | Output filter | `PidginEnable On` |
-| **Caddy** | Go middleware (cgo) | `pidgin` |
-| **Traefik** | Pure Go plugin | middleware config |
-| **HAProxy** | SPOE agent | filter config |
-| **FastAPI** | Python middleware | `add_middleware(PidginMiddleware)` |
-| **Django** | Python middleware | `MIDDLEWARE = [...]` |
-
-## API Reference
-
-### SchemaCodec
 
 ```python
-from pidgin import SchemaCodec
-
-codec = SchemaCodec.learn(samples)          # learn schema
-compressed = codec.compress(data)            # dict or list[dict] -> bytes
-original = codec.decompress(compressed)      # bytes -> dict or list[dict]
-profile_json = codec.profile.to_json()       # share with clients
-```
-
-### Schema Evolution
-
-```python
-v2 = codec.profile.evolve(new_samples)       # backward + forward compatible
-diff = codec.profile.diff(v2)                 # human-readable changes
-codec_v2 = SchemaCodec(v2)                    # use evolved profile
-```
-
-### RatchetCipher (optional)
-
-```python
-from pidgin import RatchetCipher              # pip install pidgin[crypto]
+from pidgin import RatchetCipher
 
 cipher = RatchetCipher(shared_secret=b"key")
-encrypted = cipher.encrypt(compressed)        # forward secrecy
-original = cipher.decrypt(encrypted)          # ratchet stays in sync
+encrypted = cipher.encrypt(compressed)        # key moves forward after each message
+original = peer_cipher.decrypt(encrypted)     # peer with the same secret stays in step
 ```
 
-### SecureChannel (optional)
-
 ```python
-from pidgin import SecureChannel              # pip install pidgin[crypto]
+from pidgin import SecureChannel
 
 alice = SecureChannel.create("alice")
 bob = SecureChannel.create("bob")
 alice.handshake(bob.public_key)               # X25519 key exchange
 bob.handshake(alice.public_key)
-envelope = alice.send("Hello")                # compress + encrypt + HMAC
-msg = bob.receive(envelope)                   # verify + decrypt + decompress
+envelope = alice.send("Hello")                # compress, encrypt, sign
+message = bob.receive(envelope)               # dict with text, sender, id, ts
 ```
 
-## C Library
+## C library
 
-For non-Python environments, `libpidgin` provides a standalone C API:
+`libpidgin` is the engine the server modules are built on.
 
 ```c
 #include <pidgin.h>
@@ -234,27 +201,45 @@ pidgin_engine_observe(engine, "/api/users", json_str);
 
 if (pidgin_engine_ready(engine, "/api/users")) {
     pidgin_buf_t compressed = pidgin_engine_compress(engine, "/api/users", json_str);
-    // send compressed.data (compressed.len bytes) to client
+    if (compressed.len > 0) {
+        /* send compressed.data (compressed.len bytes) */
+    } else {
+        /* data does not fit the profile: send json_str as it is */
+    }
     pidgin_buf_free(&compressed);
 }
 ```
 
-## Project Structure
+Build and test: `make -C libpidgin && make -C libpidgin test` (needs brotli).
+
+## Running the checks
+
+```bash
+make setup                                        # venv with the C extension
+.venv/bin/pip install fastapi httpx django        # for the middleware tests
+make -C libpidgin                                 # enables the C and Python tests against libpidgin
+cd clients/js && npm ci && npm test && cd ../..   # JS decoder; also enables the Python to JS test
+make test
+```
+
+Tests whose tools are missing are skipped, not failed.
+
+## Project structure
 
 ```
 pidgin/
-  libpidgin/          C library (foundation for all server modules)
-  modules/            nginx, Apache, Kong, Caddy, Traefik, HAProxy
-  src/pidgin/         Python package with C extension
+  src/pidgin/         Python package with C extension and FastAPI/Django middleware
+  libpidgin/          C library
   clients/js/         TypeScript decoder (@pidgin/codec)
-  benchmarks/         Protobuf comparison suite
-  docker/             Docker Compose test stack
-  docs/               Landing page
+  modules/            Kong (experimental); nginx, Apache, Caddy, Traefik, HAProxy (not working yet)
+  benchmarks/         comparison scripts and fixtures
+  docker/             test stack for the server modules
+  docs/               landing page
 ```
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
 
 ---
 
