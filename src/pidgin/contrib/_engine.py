@@ -104,6 +104,13 @@ class PidginEngine:
         if state.codec is None:
             return None
 
+        # The profile is learned from the records inside the response. A
+        # pagination wrapper such as {"data": [...], "total": 10} has a
+        # different shape, so encoding it with that profile would decode to
+        # the wrong object. Send those responses as plain JSON instead.
+        if not self._is_bare_records(data):
+            return None
+
         try:
             return state.codec.compress(data)
         except Exception:
@@ -170,6 +177,15 @@ class PidginEngine:
                     return [r for r in data[key] if isinstance(r, dict)]
             return [data]
         return []
+
+    @classmethod
+    def _is_bare_records(cls, data: Any) -> bool:
+        """True when data is a record or a list of records, not a wrapper."""
+        if isinstance(data, list):
+            return bool(data) and all(isinstance(r, dict) for r in data)
+        if isinstance(data, dict):
+            return cls._extract_records(data) == [data]
+        return False
 
     @staticmethod
     def _hash_keys(records: list[dict]) -> str:

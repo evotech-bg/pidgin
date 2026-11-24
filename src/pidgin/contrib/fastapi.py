@@ -138,7 +138,9 @@ class PidginMiddleware(BaseHTTPMiddleware):
             )
 
         # Return compressed response
-        headers = dict(response.headers)
+        # Drop the length of the original JSON body; Response sets the
+        # correct one for the compressed body.
+        headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
         headers["content-encoding"] = "pidgin"
         headers["content-type"] = "application/octet-stream"
         headers["x-pidgin-profile"] = self.engine.get_profile_endpoint(endpoint)
